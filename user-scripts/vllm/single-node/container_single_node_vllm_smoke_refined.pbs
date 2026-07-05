@@ -1,0 +1,407 @@
+#!/bin/bash
+#PBS -N qwen_vllm_container_smoke
+#PBS -j oe
+#PBS -l walltime=01:00:00
+#PBS -P hpc_admin
+#PBS -q gpu_as
+
+
+# ============================================================
+# Containerized single-node vLLM smoke-test script
+#
+# Purpose:
+#   Start a vLLM OpenAI-compatible server inside an Apptainer
+#   container on one PBS GPU node, wait until the server is ready,
+#   then optionally send one test prompt to confirm that inference works.
+#
+# Intended user changes:
+#   1. Choose the number of GPUs in the PBS resource section.
+#   2. Set TP_SIZE to match the requested GPU count.
+#   3. Update SIF, BENCH_ROOT, MODEL_ID, and possibly PORT.
+#
+# Re-run note:
+#   If a previous run failed during model download, compilation, or cache
+#   initialization, it is often cleaner to remove the relevant cache/result
+#   directories under BENCH_ROOT before re-running.
+# ============================================================
+
+
+# ============================================================
+# Required PBS GPU selection
+#
+# Enable exactly ONE resource request below. The active line must request
+# the same number of GPUs as TP_SIZE.
+#
+# Example:
+#   For ngpus=1, use TP_SIZE=1.
+#   For ngpus=2, use TP_SIZE=2.
+#
+# TP_SIZE controls vLLM tensor parallelism. Valid values depend on both
+# the model architecture and the number of allocated GPUs.
+# ============================================================
+
+# ---- 1 GPU run ----
+#PBS -l select=1:ngpus=1
+export TP_SIZE=1
+
+# ---- 2 GPU run ----
+##PBS -l select=1:ngpus=2
+# export TP_SIZE=2
+
+# Note: The allowed TP_SIZE is dependent on model. The parallelization method used here is MODEL PARRALELIZATION
+# ============================================================
+
+
+set -euo pipefail
+
+echo "============================================================"
+echo "PBS job started"
+echo "Job ID:        ${PBS_JOBID:-unknown}"
+echo "Job name:      ${PBS_JOBNAME:-unknown}"
+echo "Submit dir:    ${PBS_O_WORKDIR:-unknown}"
+echo "Running host:  $(hostname)"
+echo "Date:          $(date)"
+echo "TP_SIZE:       ${TP_SIZE}"
+echo "============================================================"
+
+cd "${PBS_O_WORKDIR:-$HOME}"
+
+
+# ------------------------------------------------------------
+# Required modules for the container workflow
+#
+# apptainer  : runs the vLLM container.
+# gocryptfs  : supports encrypted/fuse-based container home handling on
+#              some clusters.
+# squashfuse : supports SquashFS image mounting without privileged access.
+#
+# ------------------------------------------------------------
+module load apptainer/1.4.1
+module load gocryptfs/2.5.0
+module load squashfuse/0.5.2
+
+
+# ------------------------------------------------------------
+# Required: Apptainer image path
+#
+# Update this to the absolute path of the vLLM container image.
+# ------------------------------------------------------------
+export SIF="/home/pham0094/guidellm_vLLMBench/host_model_test/vllm_container/vllm_26.04-py3.sif"
+
+
+# ------------------------------------------------------------
+# Required: project working directory on large/shared storage
+#
+# vLLM does not require a variable named BENCH_ROOT. We define it here
+# to keep model files, caches, logs, temporary files, and results under
+# one easy-to-inspect directory.
+#
+# Recommended:
+#   Use a path on large project/scratch storage, not a small home quota.
+#   Keep the path reasonably short to avoid long Unix socket/path issues.
+# ------------------------------------------------------------
+export BENCH_ROOT="/projects_vol/gp_hpcadmin/pham0094/ConSingle"
+
+# ------------------------------------------------------------
+# Required: Hugging Face cache root
+#
+# HF_HOME is read by Hugging Face tooling. Model weights, tokenizer files,
+# configuration files, and related metadata are cached here.
+# ------------------------------------------------------------
+export HF_HOME="$BENCH_ROOT/hf_home"
+
+# ------------------------------------------------------------
+# Required/recommended runtime cache directories
+#
+# These variables are used by vLLM, PyTorch, Triton, FlashInfer, and
+# related runtime/JIT components. Keeping them inside BENCH_ROOT makes
+# the run reproducible and easier to clean.
+#
+# Troubleshooting:
+#   If the run fails with errors such as "zmq.error.ZMQError" or path-
+#   length related socket issues, shorten BENCH_ROOT and TMPDIR. If that
+#   is not possible, place TMPDIR in a shorter path and update the bind
+#   settings accordingly.
+# ------------------------------------------------------------
+export XDG_CACHE_HOME="$BENCH_ROOT/xdg_cache"
+export VLLM_CACHE_ROOT="$BENCH_ROOT/vllm_cache"
+export FLASHINFER_WORKSPACE_DIR="$BENCH_ROOT/flashinfer_cache"
+export TORCHINDUCTOR_CACHE_DIR="$BENCH_ROOT/torchinductor_cache"
+export TRITON_CACHE_DIR="$BENCH_ROOT/triton_cache"
+export TMPDIR="$BENCH_ROOT/tmp"
+
+# ------------------------------------------------------------
+# Optional: logs and per-run output files
+#
+# PBS already captures stdout/stderr in the job output file. The variables
+# below create additional structured logs and JSON/text artifacts that are
+# useful for debugging, sharing, and comparing runs.
+# ------------------------------------------------------------
+export VLLM_LOG_DIR="$BENCH_ROOT/logs"
+
+export RUN_TAG="container_qwen2p5_7b_tp${TP_SIZE}_smoke_${PBS_JOBID:-manual}_$(date +%Y%m%d_%H%M%S)"
+export RUN_DIR="$BENCH_ROOT/results/$RUN_TAG"
+
+export VLLM_LOG_FILE="$VLLM_LOG_DIR/vllm_qwen2p5_7b_tp${TP_SIZE}_${PBS_JOBID:-manual}.log"
+export MODELS_JSON="$RUN_DIR/models.json"
+export REQUEST_JSON="$RUN_DIR/request.json"
+export RESPONSE_JSON="$RUN_DIR/response.json"
+export RESPONSE_TXT="$RUN_DIR/response_text.txt"
+
+# ------------------------------------------------------------
+# Required: create all directories used by the job
+#
+# ------------------------------------------------------------
+mkdir -p \
+  "$BENCH_ROOT" \
+  "$HF_HOME" \
+  "$XDG_CACHE_HOME" \
+  "$VLLM_CACHE_ROOT" \
+  "$FLASHINFER_WORKSPACE_DIR" \
+  "$TORCHINDUCTOR_CACHE_DIR" \
+  "$TRITON_CACHE_DIR" \
+  "$TMPDIR" \
+  "$VLLM_LOG_DIR" \
+  "$RUN_DIR" \
+  "$BENCH_ROOT/.cache/flashinfer"
+
+echo "============================================================"
+echo "Starting containerized vLLM smoke test"
+echo "Host:                       $(hostname)"
+echo "SIF:                        $SIF"
+echo "BENCH_ROOT:                 $BENCH_ROOT"
+echo "HF_HOME:                    $HF_HOME"
+echo "XDG_CACHE_HOME:             $XDG_CACHE_HOME"
+echo "VLLM_CACHE_ROOT:            $VLLM_CACHE_ROOT"
+echo "FLASHINFER_WORKSPACE_DIR:   $FLASHINFER_WORKSPACE_DIR"
+echo "TORCHINDUCTOR_CACHE_DIR:    $TORCHINDUCTOR_CACHE_DIR"
+echo "TRITON_CACHE_DIR:           $TRITON_CACHE_DIR"
+echo "TMPDIR:                     $TMPDIR"
+echo "RUN_DIR:                    $RUN_DIR"
+echo "vLLM log file:              $VLLM_LOG_FILE"
+echo "CUDA_VISIBLE_DEVICES:       ${CUDA_VISIBLE_DEVICES:-unset}"
+echo "============================================================"
+
+echo "Checking GPU visibility on host:"
+nvidia-smi -L || true
+
+VISIBLE_GPU_COUNT="$(nvidia-smi -L 2>/dev/null | wc -l || echo 0)"
+echo "Visible GPU count according to nvidia-smi: $VISIBLE_GPU_COUNT"
+
+if [[ "$VISIBLE_GPU_COUNT" -lt "$TP_SIZE" ]]; then
+  echo "ERROR: TP_SIZE=$TP_SIZE but only $VISIBLE_GPU_COUNT GPU(s) are visible."
+  echo "Check the active #PBS select line and scheduler GPU allocation."
+  exit 1
+fi
+
+if [[ ! -f "$SIF" ]]; then
+  echo "ERROR: SIF image not found:"
+  echo "$SIF"
+  exit 1
+fi
+
+
+# ------------------------------------------------------------
+# Required: vLLM server settings
+#
+# PORT:
+#   The HTTP port exposed by vLLM. Use another value such as 8001 or
+#   8002 if 8000 is already occupied on the node.
+#
+# SERVER_URL:
+#   URL used by this script to send local API requests to the server.
+#   127.0.0.1 means "this same compute node".
+#
+# HOST:
+#   0.0.0.0 makes vLLM listen on all network interfaces of the node.
+#   Use 127.0.0.1 for same-node/local-only serving.
+#
+# MODEL_ID:
+#   Hugging Face model identifier passed to "vllm serve".
+# ------------------------------------------------------------
+export PORT=8000
+export SERVER_URL="http://127.0.0.1:${PORT}"
+export HOST="0.0.0.0"
+export MODEL_ID="Qwen/Qwen2.5-7B-Instruct"
+
+echo "============================================================"
+echo "Launching vLLM server in background"
+echo "Endpoint: $SERVER_URL"
+echo "Model: $MODEL_ID"
+echo "============================================================"
+
+setsid apptainer exec --nv --cleanenv \
+  --home $BENCH_ROOT \
+  --bind "$BENCH_ROOT:$BENCH_ROOT" \
+  --env HF_HOME="$HF_HOME" \
+  --env XDG_CACHE_HOME="$XDG_CACHE_HOME" \
+  --env VLLM_CACHE_ROOT="$VLLM_CACHE_ROOT" \
+  --env FLASHINFER_WORKSPACE_DIR="$FLASHINFER_WORKSPACE_DIR" \
+  --env TORCHINDUCTOR_CACHE_DIR="$TORCHINDUCTOR_CACHE_DIR" \
+  --env TRITON_CACHE_DIR="$TRITON_CACHE_DIR" \
+  --env TMPDIR="$TMPDIR" \
+  --env PYTHONNOUSERSITE=1 \
+  "$SIF" \
+  vllm serve "$MODEL_ID" \
+    --host "$HOST" \
+    --port "$PORT" \
+    --tensor-parallel-size "$TP_SIZE" \
+    --dtype auto \
+  > "$VLLM_LOG_FILE" 2>&1 &
+
+# ------------------------------------------------------------
+# Recommended: cleanup handler
+#
+# vLLM runs in the background so that this script can wait for readiness
+# and run the smoke test. The cleanup handler stops the vLLM process group
+# when the PBS job exits, fails, or is interrupted.
+# ------------------------------------------------------------
+
+VLLM_PID=$!
+
+cleanup() {
+  echo "============================================================"
+  echo "Cleaning up vLLM server"
+  echo "vLLM PID: ${VLLM_PID:-unset}"
+  echo "============================================================"
+
+  if [[ -n "${VLLM_PID:-}" ]] && kill -0 "$VLLM_PID" 2>/dev/null; then
+    echo "Sending TERM to vLLM process group..."
+    kill -TERM "-$VLLM_PID" 2>/dev/null || kill -TERM "$VLLM_PID" 2>/dev/null || true
+    sleep 5
+
+    if kill -0 "$VLLM_PID" 2>/dev/null; then
+      echo "vLLM still running; sending KILL..."
+      kill -KILL "-$VLLM_PID" 2>/dev/null || kill -KILL "$VLLM_PID" 2>/dev/null || true
+    fi
+  fi
+
+  echo "Cleanup complete."
+}
+
+trap cleanup EXIT
+
+echo "vLLM server PID: $VLLM_PID"
+echo "vLLM log file:   $VLLM_LOG_FILE"
+
+# ------------------------------------------------------------
+# Recommended: readiness check
+#
+# The server may need time to download model files, initialize CUDA, compile
+# kernels, and load weights. This loop waits until /v1/models responds.
+#
+# The loop also prints recent vLLM logs periodically, which is useful when
+# diagnosing slow model initialization or startup failures.
+# ------------------------------------------------------------
+echo "============================================================"
+echo "Waiting for vLLM API readiness"
+echo "============================================================"
+
+READY=0
+for i in $(seq 1 900); do
+  if curl -fsS "$SERVER_URL/v1/models" > "$MODELS_JSON" 2>/dev/null; then
+    READY=1
+    echo "vLLM server is ready after $i check(s)."
+    break
+  fi
+
+  if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+    echo "ERROR: vLLM server exited before becoming ready."
+    echo "Last 120 lines of vLLM log:"
+    tail -n 120 "$VLLM_LOG_FILE" || true
+    exit 1
+  fi
+
+  if (( i % 30 == 0 )); then
+    echo "Still waiting... check $i"
+    echo "Last 20 lines of vLLM log:"
+    tail -n 20 "$VLLM_LOG_FILE" || true
+  fi
+
+  sleep 2
+done
+
+if [[ "$READY" -ne 1 ]]; then
+  echo "ERROR: vLLM server did not become ready in time."
+  echo "Last 120 lines of vLLM log:"
+  tail -n 120 "$VLLM_LOG_FILE" || true
+  exit 1
+fi
+
+echo "Model list saved to:"
+echo "$MODELS_JSON"
+
+
+# ------------------------------------------------------------
+# Optional: single-prompt smoke test
+#
+# This verifies that the OpenAI-compatible chat completions endpoint is
+# reachable and that the loaded model can generate a response.
+#
+# Users can modify the prompt, max_tokens, temperature, or remove this
+# block entirely if they only want to launch the server.
+# ------------------------------------------------------------
+cat > "$REQUEST_JSON" <<EOF
+{
+  "model": "$MODEL_ID",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me how LLM works in simple terms."
+    }
+  ],
+  "max_tokens": 256,
+  "temperature": 0
+}
+EOF
+
+echo "============================================================"
+echo "Sending smoke-test prompt"
+echo "Request JSON:  $REQUEST_JSON"
+echo "Response JSON: $RESPONSE_JSON"
+echo "============================================================"
+
+curl -fsS "$SERVER_URL/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d @"$REQUEST_JSON" \
+  | tee "$RESPONSE_JSON"
+
+echo
+echo "============================================================"
+echo "Extracting assistant response text"
+echo "============================================================"
+
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$RESPONSE_JSON" "$RESPONSE_TXT" <<'PY'
+import json
+import sys
+
+response_path = sys.argv[1]
+text_path = sys.argv[2]
+
+with open(response_path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+text = data["choices"][0]["message"]["content"]
+
+print(text)
+
+with open(text_path, "w", encoding="utf-8") as f:
+    f.write(text)
+    f.write("\n")
+PY
+  echo
+  echo "Assistant response text saved to:"
+  echo "$RESPONSE_TXT"
+else
+  echo "python3 not found on host; raw JSON response is saved instead:"
+  echo "$RESPONSE_JSON"
+fi
+
+echo "============================================================"
+echo "Smoke test completed successfully"
+echo "RUN_DIR:       $RUN_DIR"
+echo "vLLM log:      $VLLM_LOG_FILE"
+echo "Response JSON: $RESPONSE_JSON"
+echo "Date:          $(date)"
+echo "============================================================"
