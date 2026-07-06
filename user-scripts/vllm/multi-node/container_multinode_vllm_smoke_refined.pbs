@@ -1,0 +1,694 @@
+#!/bin/bash
+#PBS -N benchmark_2x2
+#PBS -P hpc_admin
+#PBS -q gpu_as
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -l place=scatter
+
+# One-time Ray install inside the same container/home shape used by the PBS job
+# Best practice for installing Ray ONCE using the container env and then re-use it for different BENCH_ROOT for vllm later:
+# - When you install ray, export a clear ENV_ROOT for the container as its home using --home $ENV_ROOT and --bind $ENV_ROOT:$ENV_ROOT
+# - This is where you are going to store most of the extra packages that you want to install to use with the container
+# - Then when you deploy the vllm server, you can use export ENV_ROOT and then --home $ENV_ROOT and --bind $ENV_ROOT:$ENV_ROOT to use the same Ray
+# - The reason we need to set --home is because Ray is installed using pip install --user
+#   (this flag is important as it istruct the installation to point to the container's /home as defined in --home,
+#   so the container need to be pointed to where all of those are stored
+#
+# apptainer exec --nv --cleanenv \
+#   --home "$ENV_ROOT" \
+#   --bind "$ENV_ROOT:$ENV_ROOT" \
+#   "$SIF" \
+#   python3 -m pip install --user "ray[default]"
+#
+# Verification
+# apptainer exec --nv --cleanenv \
+#   --home "$ENV_ROOT" \
+#   --bind "$ENV_ROOT:$ENV_ROOT" \
+#   "$SIF" \
+#   bash -lc 'python3 -c "import ray; print(ray.__version__)" && ~/.local/bin/ray --version'
+
+
+# ============================================================
+# Multi-node GPU toggle section
+# Parallelization method:
+# - On the same node: tensor-parallel
+# - Accross nodes: pipeline-parallel
+# - For different type of parallelization method please edit the code accordingly
+#
+# Enable exactly ONE select line.
+# NOTE: mpiprocs=1 because of how vllm is launched using Ray: each node has 1 Ray head/worker, and let the Ray head/worker control the tasks on the gpus
+# The structure of Ray is that it will have 1 Ray head on a node and 1 Ray worker on the remaining nodes
+#
+# ---- 2 nodes x 1 GPU each = 2 total GPUs ----
+#PBS -l select=2:ncpus=12:ngpus=2:mpiprocs=1
+export GPUS_PER_NODE=2
+export TP_SIZE=2
+export PP_SIZE=2
+#
+# ---- 2 nodes x 2 GPUs each = 4 total GPUs ----
+##PBS -l select=2:ncpus=24:ngpus=2:mpiprocs=1
+# export GPUS_PER_NODE=2
+# export TP_SIZE=2
+# export PP_SIZE=2
+#
+# vLLM multi-node layout:
+#   TP_SIZE = GPUs per node
+#   PP_SIZE = number of nodes
+#
+# Examples:
+#   2x1 -> TP_SIZE=1, PP_SIZE=2
+#   2x2 -> TP_SIZE=2, PP_SIZE=2
+# ============================================================
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$HOME}" || exit 1
+
+echo "============================================================"
+echo "PBS job started"
+echo "Job ID:        ${PBS_JOBID:-unknown}"
+echo "Job name:      ${PBS_JOBNAME:-unknown}"
+echo "Submit dir:    ${PBS_O_WORKDIR:-unknown}"
+echo "Running host:  $(hostname)"
+echo "Date:          $(date)"
+echo "GPUS_PER_NODE: ${GPUS_PER_NODE}"
+echo "TP_SIZE:       ${TP_SIZE}"
+echo "PP_SIZE:       ${PP_SIZE}"
+echo "============================================================"
+
+# ------------------------------------------------------------
+# Load modules
+# ------------------------------------------------------------
+module load apptainer/1.4.1
+module load gocryptfs/2.5.0
+module load squashfuse/0.5.2
+module load nvhpc/26.3
+
+# ------------------------------------------------------------
+# Use HPC-X OpenMPI from NVHPC
+# Same style as your working PyTorch DDP benchmark.
+# ------------------------------------------------------------
+NVROOT=$(dirname "$(dirname "$(dirname "$(command -v nvfortran)")")")
+
+export PATH="${NVROOT}/comm_libs/hpcx/bin:${PATH}"
+export LD_LIBRARY_PATH="${NVROOT}/comm_libs/hpcx/lib:${LD_LIBRARY_PATH:-}"
+
+# ------------------------------------------------------------
+# Container image
+# ------------------------------------------------------------
+export SIF="$HOME/guidellm_vLLMBench/vLLM_container/vllm_26.04-py3.sif"
+
+# ------------------------------------------------------------
+# Project working directory on shared storage
+# This must be visible from all allocated nodes.
+# ------------------------------------------------------------
+export BENCH_ROOT="/projects_vol/gp_hpcadmin/pham0094/ConMul"
+
+# Ray was installed with pip --user inside this container home.
+# Use the explicit binary because cleanenv may not include ~/.local/bin in PATH.
+# export RAY_BIN="$BENCH_ROOT/.local/bin/ray"
+export ENV_ROOT="/projects_vol/gp_hpcadmin/pham0094/guidellm_vLLMBench/"
+export RAY_BIN="/projects_vol/gp_hpcadmin/pham0094/guidellm_vLLMBench/.local/bin/ray"
+
+# ------------------------------------------------------------
+# Hugging Face cache
+# ------------------------------------------------------------
+export HF_HOME="$BENCH_ROOT/hf_home"
+
+# ------------------------------------------------------------
+# Runtime/JIT/cache directories
+# ------------------------------------------------------------
+export XDG_CACHE_HOME="$BENCH_ROOT/xdg_cache"
+export VLLM_CACHE_ROOT="$BENCH_ROOT/vllm_cache"
+export FLASHINFER_WORKSPACE_DIR="$BENCH_ROOT/flashinfer_cache"
+export TORCHINDUCTOR_CACHE_DIR="$BENCH_ROOT/torchinductor_cache"
+export TRITON_CACHE_DIR="$BENCH_ROOT/triton_cache"
+export TMPDIR="$BENCH_ROOT/tmp"
+
+# ------------------------------------------------------------
+# Logs and outputs
+# ------------------------------------------------------------
+export VLLM_LOG_DIR="$BENCH_ROOT/logs"
+
+export RUN_TAG="container_qwen2p5_7b_multinode_tp${TP_SIZE}_pp${PP_SIZE}_${PBS_JOBID:-manual}_$(date +%Y%m%d_%H%M%S)"
+export RUN_DIR="$BENCH_ROOT/results/$RUN_TAG"
+
+export RAY_LOG_DIR="$RUN_DIR/ray_logs"
+export VLLM_LOG_FILE="$VLLM_LOG_DIR/vllm_qwen2p5_7b_multinode_tp${TP_SIZE}_pp${PP_SIZE}_${PBS_JOBID:-manual}.log"
+export MODELS_JSON="$RUN_DIR/models.json"
+export REQUEST_JSON="$RUN_DIR/request.json"
+export RESPONSE_JSON="$RUN_DIR/response.json"
+export RESPONSE_TXT="$RUN_DIR/response_text.txt"
+
+mkdir -p \
+  "$HF_HOME" \
+  "$XDG_CACHE_HOME" \
+  "$VLLM_CACHE_ROOT" \
+  "$FLASHINFER_WORKSPACE_DIR" \
+  "$TORCHINDUCTOR_CACHE_DIR" \
+  "$TRITON_CACHE_DIR" \
+  "$TMPDIR" \
+  "$VLLM_LOG_DIR" \
+  "$RUN_DIR" \
+  "$RAY_LOG_DIR" \
+  "$BENCH_ROOT/.cache/flashinfer"
+
+if [[ ! -f "$SIF" ]]; then
+  echo "ERROR: SIF image not found:"
+  echo "$SIF"
+  exit 1
+fi
+
+if [[ -z "${PBS_NODEFILE:-}" ]] || [[ ! -f "$PBS_NODEFILE" ]]; then
+  echo "ERROR: PBS_NODEFILE is not set or does not exist."
+  exit 1
+fi
+
+# ------------------------------------------------------------
+# Automatically derive allocation of nodes and print out. Recommended for debugging
+# ------------------------------------------------------------
+mapfile -t NODES < <(sort -u "$PBS_NODEFILE")
+
+NNODES="${#NODES[@]}"
+HEAD_NODE="${NODES[0]}"
+
+if [[ "$NNODES" -ne "$PP_SIZE" ]]; then
+  echo "ERROR: Allocated node count NNODES=$NNODES but PP_SIZE=$PP_SIZE."
+  echo "Allocated nodes:"
+  printf '  %s\n' "${NODES[@]}"
+  exit 1
+fi
+
+# Total PBS slots. With mpiprocs=1 this should equal NNODES.
+NPROCS=$(wc -l < "$PBS_NODEFILE")
+
+echo "============================================================"
+echo "PBS allocation"
+echo "============================================================"
+echo "NPROCS from PBS_NODEFILE: $NPROCS"
+echo "NNODES:                  $NNODES"
+echo "GPUS_PER_NODE:           $GPUS_PER_NODE"
+echo "NODES:"
+printf '  %s\n' "${NODES[@]}"
+echo "HEAD_NODE:               $HEAD_NODE"
+echo "============================================================"
+
+# ------------------------------------------------------------
+# Resolve head node IP for communcation between Ray head and workers
+#
+# This follows the same style as your PyTorch script:
+#   MASTER_ADDR=$(head -1 "$PBS_NODEFILE")
+#
+# If this resolves to the wrong network later, replace HEAD_IP with
+# your preferred IB/IPoIB hostname/IP.
+# ------------------------------------------------------------
+HEAD_IP="$(getent ahostsv4 "$HEAD_NODE" | awk '{print $1; exit}')"
+
+# Fallback: ask the head node for its first non-loopback IPv4 address.
+# Avoid IPv6 link-local fe80:: addresses because Ray address parsing will fail.
+if [[ -z "$HEAD_IP" ]]; then
+  HEAD_IP="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^[0-9]+\./ {print; exit}')"
+fi
+
+if [[ -z "$HEAD_IP" ]]; then
+  echo "ERROR: Could not resolve IP for head node: $HEAD_NODE"
+  exit 1
+fi
+
+export HEAD_IP
+
+# ------------------------------------------------------------
+# Derive per-job Ray port from PBS_JOBID
+# This section generate a random port number to use as the port for Ray communcation
+# The aim is to minimize accidentally using a used ports when the node is shared by many users
+# If this happens simply re-submit the jobs again
+# ------------------------------------------------------------
+JOB_NUM=$(echo "${PBS_JOBID:-0}" | sed 's/[^0-9].*//')
+if [[ -z "$JOB_NUM" ]]; then
+  JOB_NUM=0
+fi
+
+export RAY_PORT=$((20000 + JOB_NUM % 40000))
+export RAY_ADDRESS="${HEAD_IP}:${RAY_PORT}"
+
+# Keep Ray runtime sockets under a short local path.
+# Ray uses AF_UNIX sockets; long paths under RUN_DIR can exceed the 107-byte limit.
+export RAY_TMP_BASE="/tmp/ray_${JOB_NUM}_${USER:-user}"
+
+# vLLM OpenAI-compatible API server
+export PORT=8000
+export SERVER_URL="http://${HEAD_IP}:${PORT}"
+
+# ------------------------------------------------------------
+# NCCL / communication settings - this is a working settings for multinode jobs for the GAAS cluster, change accordingly based on your need.
+#
+# This mirrors your working PyTorch benchmark.
+# Do NOT force Ethernet here.
+# ------------------------------------------------------------
+export NCCL_IB_DISABLE=0
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export OMP_NUM_THREADS=1
+
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=INIT,NET,GRAPH
+
+# Important:
+# Avoid mlx5_bond_0 failure path by explicitly selecting HCAs.
+export NCCL_IB_HCA=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_8,mlx5_9
+
+# Apptainer env passthrough
+export APPTAINERENV_HEAD_IP="$HEAD_IP"
+export APPTAINERENV_RAY_PORT="$RAY_PORT"
+export APPTAINERENV_RAY_ADDRESS="$RAY_ADDRESS"
+export APPTAINERENV_RAY_BIN="$RAY_BIN"
+export APPTAINERENV_RAY_TMP_BASE="$RAY_TMP_BASE"
+export APPTAINERENV_NCCL_IB_DISABLE="$NCCL_IB_DISABLE"
+export APPTAINERENV_NCCL_DEBUG="$NCCL_DEBUG"
+export APPTAINERENV_NCCL_DEBUG_SUBSYS="$NCCL_DEBUG_SUBSYS"
+export APPTAINERENV_NCCL_IB_HCA="$NCCL_IB_HCA"
+export APPTAINERENV_TORCH_NCCL_ASYNC_ERROR_HANDLING="$TORCH_NCCL_ASYNC_ERROR_HANDLING"
+export APPTAINERENV_OMP_NUM_THREADS="$OMP_NUM_THREADS"
+
+echo "============================================================"
+echo "Multi-node vLLM configuration"
+echo "============================================================"
+echo "JOBID:                ${PBS_JOBID:-unknown}"
+echo "WORKDIR:              ${PBS_O_WORKDIR:-unknown}"
+echo "DATE:                 $(date)"
+echo "LAYOUT:               ${NNODES} nodes x ${GPUS_PER_NODE} GPUs"
+echo "TP_SIZE:              ${TP_SIZE}"
+echo "PP_SIZE:              ${PP_SIZE}"
+echo "TOTAL MODEL GPUS:     $(( TP_SIZE * PP_SIZE ))"
+echo "HEAD_NODE:            ${HEAD_NODE}"
+echo "HEAD_IP:              ${HEAD_IP}"
+echo "RAY_ADDRESS:          ${RAY_ADDRESS}"
+echo "RAY_BIN:              ${RAY_BIN}"
+echo "RAY_TMP_BASE:         ${RAY_TMP_BASE}"
+echo "SERVER_URL:           ${SERVER_URL}"
+echo "SIF:                  ${SIF}"
+echo "BENCH_ROOT:           ${BENCH_ROOT}"
+echo "RUN_DIR:              ${RUN_DIR}"
+echo "VLLM_LOG_FILE:        ${VLLM_LOG_FILE}"
+echo "NCCL_IB_DISABLE:      ${NCCL_IB_DISABLE}"
+echo "NCCL_IB_HCA:          ${NCCL_IB_HCA}"
+echo "NCCL_DEBUG_SUBSYS:    ${NCCL_DEBUG_SUBSYS}"
+echo "NODES:                $(printf '%s ' "${NODES[@]}")"
+echo "============================================================"
+
+# ------------------------------------------------------------
+# Common Apptainer command prefix
+# Some understanding about the --home and --bind flag to ensure consistency when installing packages to use with the container
+#  +) --home is to define the container's /home. This is where the container will find its installed packages and write some of the data when launched
+#  +) --bind is to allow the container to "see" the host's path
+# Here the set up is as follows:
+#   - ENV_ROOT is where you store all of the installed packages with pip install --user than you want to work with the container.
+#     vllm will also store some data here
+#   - BENCH_ROOT is where most of the model data is stored
+# ------------------------------------------------------------
+APPTAINER_CMD="apptainer exec --nv --cleanenv \
+  --home $ENV_ROOT \
+  --bind $BENCH_ROOT:$BENCH_ROOT \
+  --bind $ENV_ROOT:$ENV_ROOT \
+  --bind /dev/shm:/dev/shm \
+  --env HF_HOME=$HF_HOME \
+  --env XDG_CACHE_HOME=$XDG_CACHE_HOME \
+  --env VLLM_CACHE_ROOT=$VLLM_CACHE_ROOT \
+  --env FLASHINFER_WORKSPACE_DIR=$FLASHINFER_WORKSPACE_DIR \
+  --env TORCHINDUCTOR_CACHE_DIR=$TORCHINDUCTOR_CACHE_DIR \
+  --env TRITON_CACHE_DIR=$TRITON_CACHE_DIR \
+  --env TMPDIR=$TMPDIR \
+  --env RAY_ADDRESS=$RAY_ADDRESS \
+  --env RAY_BIN=$RAY_BIN \
+  --env RAY_TMP_BASE=$RAY_TMP_BASE \
+  --env NCCL_IB_DISABLE=$NCCL_IB_DISABLE \
+  --env NCCL_DEBUG=$NCCL_DEBUG \
+  --env NCCL_DEBUG_SUBSYS=$NCCL_DEBUG_SUBSYS \
+  --env NCCL_IB_HCA=$NCCL_IB_HCA \
+  --env TORCH_NCCL_ASYNC_ERROR_HANDLING=$TORCH_NCCL_ASYNC_ERROR_HANDLING \
+  --env OMP_NUM_THREADS=$OMP_NUM_THREADS \
+  $SIF"
+
+# ------------------------------------------------------------
+# Helper: run command on one PBS allocated node using pbs_tmrsh.
+# This function is to ensure each worker node get the correct env set up and execute the commands correctly.
+# It will be used below to launch the commands on the Ray head node and the Ray worker nodes.
+#
+# This matches your working DDP script style and avoids plain ssh.
+# ------------------------------------------------------------
+run_on_node() {
+  local node="$1"
+  shift
+  local cmd="$*"
+
+  mpirun -np 1 \
+    -host "$node" \
+    --mca plm_rsh_agent pbs_tmrsh \
+    --bind-to none \
+    -x PATH \
+    -x LD_LIBRARY_PATH \
+    -x HEAD_IP \
+    -x RAY_PORT \
+    -x RAY_ADDRESS \
+    -x RAY_BIN \
+    -x RAY_TMP_BASE \
+    -x NCCL_IB_DISABLE \
+    -x NCCL_DEBUG \
+    -x NCCL_DEBUG_SUBSYS \
+    -x NCCL_IB_HCA \
+    -x TORCH_NCCL_ASYNC_ERROR_HANDLING \
+    -x OMP_NUM_THREADS \
+    -x APPTAINERENV_HEAD_IP \
+    -x APPTAINERENV_RAY_PORT \
+    -x APPTAINERENV_RAY_ADDRESS \
+    -x APPTAINERENV_RAY_BIN \
+    -x APPTAINERENV_RAY_TMP_BASE \
+    -x APPTAINERENV_NCCL_IB_DISABLE \
+    -x APPTAINERENV_NCCL_DEBUG \
+    -x APPTAINERENV_NCCL_DEBUG_SUBSYS \
+    -x APPTAINERENV_NCCL_IB_HCA \
+    -x APPTAINERENV_TORCH_NCCL_ASYNC_ERROR_HANDLING \
+    -x APPTAINERENV_OMP_NUM_THREADS \
+    bash -lc "$cmd"
+}
+
+# ------------------------------------------------------------
+# Cleanup
+# ------------------------------------------------------------
+VLLM_PID=""
+
+cleanup() {
+  echo "============================================================"
+  echo "Cleaning up vLLM and Ray"
+  echo "Date: $(date)"
+  echo "============================================================"
+
+  if [[ -n "${VLLM_PID:-}" ]] && kill -0 "$VLLM_PID" 2>/dev/null; then
+    echo "Stopping vLLM API server..."
+    kill -TERM "-$VLLM_PID" 2>/dev/null || kill -TERM "$VLLM_PID" 2>/dev/null || true
+    sleep 5
+
+    if kill -0 "$VLLM_PID" 2>/dev/null; then
+      echo "vLLM still running; sending KILL..."
+      kill -KILL "-$VLLM_PID" 2>/dev/null || kill -KILL "$VLLM_PID" 2>/dev/null || true
+    fi
+  fi
+
+  for node in "${NODES[@]}"; do
+    echo "Stopping Ray on $node ..."
+    run_on_node "$node" "$APPTAINER_CMD "$RAY_BIN" stop --force" \
+      > "$RAY_LOG_DIR/ray_stop_${node}.log" 2>&1 || true
+  done
+
+  echo "Cleanup complete."
+}
+
+trap cleanup EXIT
+
+# ------------------------------------------------------------
+# Pre-clean stale Ray
+# ------------------------------------------------------------
+echo "============================================================"
+echo "Stopping any stale Ray processes"
+echo "============================================================"
+
+for node in "${NODES[@]}"; do
+  echo "Pre-clean Ray on $node ..."
+  run_on_node "$node" "$APPTAINER_CMD "$RAY_BIN" stop --force" \
+    > "$RAY_LOG_DIR/ray_prestop_${node}.log" 2>&1 || true
+done
+
+sleep 3
+
+# ------------------------------------------------------------
+# Check GPU visibility on each allocated node
+# ------------------------------------------------------------
+echo "============================================================"
+echo "Checking GPU visibility on each allocated node"
+echo "============================================================"
+
+for node in "${NODES[@]}"; do
+  echo "---------------- $node ----------------"
+  run_on_node "$node" "hostname; nvidia-smi -L" || true
+done
+
+# ------------------------------------------------------------
+# Start Ray head
+# ------------------------------------------------------------
+echo "============================================================"
+echo "Starting Ray head on $HEAD_NODE"
+echo "HEAD_IP:     $HEAD_IP"
+echo "RAY_PORT:    $RAY_PORT"
+echo "RAY_ADDRESS: $RAY_ADDRESS"
+echo "============================================================"
+
+run_on_node "$HEAD_NODE" "
+  export VLLM_HOST_IP='$HEAD_IP'
+  mkdir -p '$RAY_TMP_BASE/head'
+  setsid $APPTAINER_CMD "$RAY_BIN" start \
+    --head \
+    --node-ip-address='$HEAD_IP' \
+    --port='$RAY_PORT' \
+    --num-gpus='$GPUS_PER_NODE' \
+    --temp-dir='$RAY_TMP_BASE/head' \
+    --block \
+    > '$RAY_LOG_DIR/ray_head_${HEAD_NODE}.log' 2>&1 &
+"
+
+sleep 10
+
+# ------------------------------------------------------------
+# Start Ray workers
+# ------------------------------------------------------------
+echo "============================================================"
+echo "Starting Ray workers"
+echo "============================================================"
+
+for node in "${NODES[@]}"; do
+  if [[ "$node" == "$HEAD_NODE" ]]; then
+    continue
+  fi
+
+  NODE_IP="$(getent ahostsv4 "$node" | awk '{print $1; exit}')"
+
+  if [[ -z "$NODE_IP" ]]; then
+    echo "ERROR: Could not resolve IP for worker node: $node"
+    exit 1
+  fi
+
+  echo "Starting Ray worker on $node, IP=$NODE_IP"
+
+  run_on_node "$node" "
+    export VLLM_HOST_IP='$NODE_IP'
+    mkdir -p '$RAY_TMP_BASE/${node}'
+    setsid $APPTAINER_CMD "$RAY_BIN" start \
+      --address='$RAY_ADDRESS' \
+      --node-ip-address='$NODE_IP' \
+      --num-gpus='$GPUS_PER_NODE' \
+      --temp-dir='$RAY_TMP_BASE/${node}' \
+      --block \
+      > '$RAY_LOG_DIR/ray_worker_${node}.log' 2>&1 &
+  "
+done
+
+sleep 15
+
+# ------------------------------------------------------------
+# Check Ray cluster status from head, this section is mainly for debugging
+# Note that this section is design to keep retrying RAY_STATUS_MAX_ATTEMPS times
+# This is because Ray start up is asynchronous so retrying allow time for the Ray set up to stabilize instead of exiting on the first error which may be cause by the asynchronous nature of Ray
+#------------------------------------------------------------
+echo "============================================================"
+echo "Checking Ray cluster status with retries"
+echo "============================================================"
+
+# Ray/GCS can take a short time to stabilize after the head and
+# workers are launched. Do not fail the whole job on one early
+# transient `ray status` timeout.
+RAY_READY=0
+RAY_STATUS_MAX_ATTEMPTS=24
+RAY_STATUS_SLEEP_SEC=5
+
+for attempt in $(seq 1 "$RAY_STATUS_MAX_ATTEMPTS"); do
+  echo "Ray status attempt ${attempt}/${RAY_STATUS_MAX_ATTEMPTS}..."
+
+  if run_on_node "$HEAD_NODE" "$APPTAINER_CMD "$RAY_BIN" status --address='$RAY_ADDRESS'" \
+    | tee "$RUN_DIR/ray_status_attempt_${attempt}.txt"; then
+    echo "Ray status succeeded on attempt ${attempt}."
+    cp "$RUN_DIR/ray_status_attempt_${attempt}.txt" "$RUN_DIR/ray_status.txt"
+    RAY_READY=1
+    break
+  fi
+
+  echo "Ray status failed on attempt ${attempt}; waiting ${RAY_STATUS_SLEEP_SEC}s before retry..."
+  sleep "$RAY_STATUS_SLEEP_SEC"
+done
+
+if [[ "$RAY_READY" -ne 1 ]]; then
+  echo "ERROR: Ray cluster did not become ready after ${RAY_STATUS_MAX_ATTEMPTS} attempts."
+  echo "Ray head log:"
+  tail -n 160 "$RAY_LOG_DIR/ray_head_${HEAD_NODE}.log" || true
+
+  for node in "${NODES[@]}"; do
+    if [[ "$node" != "$HEAD_NODE" ]]; then
+      echo "Ray worker log for $node:"
+      tail -n 160 "$RAY_LOG_DIR/ray_worker_${node}.log" || true
+    fi
+  done
+
+  exit 1
+fi
+
+# ------------------------------------------------------------
+# Launch vLLM server on Ray head node
+# ------------------------------------------------------------
+export VLLM_HOST_IP='$HEAD_IP'
+export HOST="0.0.0.0"
+export MODEL_ID="Qwen/Qwen2.5-7B-Instruct"
+
+echo "============================================================"
+echo "Launching multi-node vLLM server"
+echo "Endpoint:      $SERVER_URL"
+echo "vLLM log file: $VLLM_LOG_FILE"
+echo "============================================================"
+
+setsid bash -lc "
+  export VLLM_HOST_IP='$HEAD_IP'
+  export HOST="0.0.0.0"
+  export MODEL_ID="Qwen/Qwen2.5-7B-Instruct"
+
+  $APPTAINER_CMD \
+    vllm serve "$MODEL_ID" \
+      --host "$HOST" \
+      --port '$PORT' \
+      --tensor-parallel-size '$TP_SIZE' \
+      --pipeline-parallel-size '$PP_SIZE' \
+      --distributed-executor-backend ray \
+      --dtype auto
+" > "$VLLM_LOG_FILE" 2>&1 &
+
+VLLM_PID=$!
+
+echo "vLLM server PID: $VLLM_PID"
+echo "vLLM log file:   $VLLM_LOG_FILE"
+
+# ------------------------------------------------------------
+# Wait for API readiness. This part is important: we must wait until the server is ready before sending the requets, or else the server will return an error
+# ------------------------------------------------------------
+echo "============================================================"
+echo "Waiting for vLLM API readiness"
+echo "============================================================"
+
+READY=0
+
+for i in $(seq 1 900); do
+  if curl -fsS "$SERVER_URL/v1/models" > "$MODELS_JSON" 2>/dev/null; then
+    READY=1
+    echo "vLLM server is ready after $i check(s)."
+    break
+  fi
+
+  if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+    echo "ERROR: vLLM server exited before becoming ready."
+    echo "Last 200 lines of vLLM log:"
+    tail -n 200 "$VLLM_LOG_FILE" || true
+
+    echo "Ray status:"
+    run_on_node "$HEAD_NODE" "$APPTAINER_CMD "$RAY_BIN" status" || true
+
+    exit 1
+  fi
+
+  if (( i % 30 == 0 )); then
+    echo "Still waiting... check $i"
+    echo "Last 40 lines of vLLM log:"
+    tail -n 40 "$VLLM_LOG_FILE" || true
+  fi
+
+  sleep 2
+done
+
+if [[ "$READY" -ne 1 ]]; then
+  echo "ERROR: vLLM server did not become ready in time."
+  echo "Last 200 lines of vLLM log:"
+  tail -n 200 "$VLLM_LOG_FILE" || true
+
+  echo "Ray status:"
+  run_on_node "$HEAD_NODE" "$APPTAINER_CMD "$RAY_BIN" status" || true
+
+  exit 1
+fi
+
+echo "Model list saved to:"
+echo "$MODELS_JSON"
+
+# ------------------------------------------------------------
+# Send one prompt to the hosted model. This is an OPTIONAL smoke test of the server
+# ------------------------------------------------------------
+cat > "$REQUEST_JSON" <<EOF
+{
+  "model": "$MODEL_ID",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me how LLM works in simple terms."
+    }
+  ],
+  "max_tokens": 256,
+  "temperature": 0
+}
+EOF
+
+echo "============================================================"
+echo "Sending smoke-test prompt"
+echo "Request JSON:  $REQUEST_JSON"
+echo "Response JSON: $RESPONSE_JSON"
+echo "============================================================"
+
+curl -fsS "$SERVER_URL/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d @"$REQUEST_JSON" \
+  | tee "$RESPONSE_JSON"
+
+echo
+echo "============================================================"
+echo "Extracting assistant response text"
+echo "============================================================"
+
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$RESPONSE_JSON" "$RESPONSE_TXT" <<'PY'
+import json
+import sys
+
+response_path = sys.argv[1]
+text_path = sys.argv[2]
+
+with open(response_path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+text = data["choices"][0]["message"]["content"]
+
+print(text)
+
+with open(text_path, "w", encoding="utf-8") as f:
+    f.write(text)
+    f.write("\n")
+PY
+
+  echo
+  echo "Assistant response text saved to:"
+  echo "$RESPONSE_TXT"
+else
+  echo "python3 not found on host; raw JSON response is saved instead:"
+  echo "$RESPONSE_JSON"
+fi
+
+echo "============================================================"
+echo "Smoke test completed successfully"
+echo "RUN_DIR:       $RUN_DIR"
+echo "Ray status:    $RUN_DIR/ray_status.txt"
+echo "Ray logs:      $RAY_LOG_DIR"
+echo "vLLM log:      $VLLM_LOG_FILE"
+echo "Response JSON: $RESPONSE_JSON"
+echo "Date:          $(date)"
+echo "============================================================"
