@@ -6,10 +6,11 @@ This repository focuses on comparing containerized and non-containerized executi
 
 - PyTorch distributed training
 - vLLM inference workloads
-- HPL
-- HPCG
+- HPC standard benchmarks: HPL and HPCG
 
 The scripts are intended to document practical cluster benchmarking workflows, including job submission, environment setup, distributed launch configuration, and runtime validation.
+
+From the benchmarking process, plug-and-play user scripts for training model using PyTorch and hosting model using vLLM is also developed. They are included in the directory ```user-scripts```
 
 ## Hardware Context
 
