@@ -24,7 +24,7 @@ The reference setup commands are included at the top of the script. The expected
 module purge
 module load vllm/0.19.0
 
-export ENV_ROOT="/home/pham0094/guidellm_vLLMBench"
+export ENV_ROOT=<path>
 
 cd "$ENV_ROOT"
 python3 -m venv --system-site-packages baremetal_ray
@@ -68,8 +68,8 @@ Rebuild the Ray virtual environment when changing:
 Update these paths for your account or project:
 
 ```bash
-export BENCH_ROOT="/projects_vol/gp_hpcadmin/pham0094/baremetal_multinode"
-export BAREMETAL_RAY_ENV="/home/pham0094/guidellm_vLLMBench/baremetal_ray"
+export BENCH_ROOT=<path>
+export BAREMETAL_RAY_ENV=<path>
 ```
 
 `BENCH_ROOT` should be model/run storage on shared storage. `BAREMETAL_RAY_ENV` should point to the reusable Ray virtual environment.

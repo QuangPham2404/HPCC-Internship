@@ -14,8 +14,8 @@ Use this script when you want to test the non-containerized vLLM stack on one GP
 Before submitting the job, check these sections in the script:
 
 1. **PBS account, queue, and resources**
-   - `#PBS -P hpc_admin`
-   - `#PBS -q gpu_as`
+   - `#PBS -P <project>
+   - `#PBS -q <queue>
    - active `#PBS -l select=...ngpus=...`
    - `TP_SIZE`
 
@@ -27,7 +27,7 @@ Before submitting the job, check these sections in the script:
    Change this only if the cluster provides another tested bare-metal vLLM module.
 
 3. **Working directory**
-   - `BENCH_ROOT="/projects_vol/gp_hpcadmin/pham0094/baremetal-qwen3B"`
+   - `BENCH_ROOT=<path>
 
    This should point to a writable persistent storage location with enough capacity for model files, caches, logs, and temporary files.
 
