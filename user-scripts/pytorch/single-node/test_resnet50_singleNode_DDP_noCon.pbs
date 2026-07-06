@@ -1,0 +1,73 @@
+#PBS -N 1x1GPU_noCon_DDP
+#PBS -q <queue>
+#PBS -P <project>
+##PBS -j oe
+
+# -----------------------------------------------------------
+# IMPORTANT:
+# Request 2 GPUs on 1 node
+#
+# To scale later:
+# ngpus=4
+# ngpus=8
+# ------------------------------------------------------------
+#PBS -l select=1:ngpus=1
+
+#PBS -l walltime=08:00:00
+
+cd $PBS_O_WORKDIR
+
+echo "===== Job Info ====="
+echo "Job ID: $PBS_JOBID"
+
+echo "Working directory: $PBS_O_WORKDIR"
+
+echo "Running on node:"
+hostname
+echo
+
+echo "===== GPU Info ====="
+nvidia-smi
+echo
+
+# ------------------------------------------------------------
+# Load modules
+# ------------------------------------------------------------
+module load python/3.12.13
+module load pytorch/2.11.0
+
+echo "===== Python / PyTorch Info ====="
+
+which python
+
+python --version
+
+python -c "
+import torch
+print('PyTorch:', torch.__version__)
+print('CUDA available:', torch.cuda.is_available())
+print('CUDA version:', torch.version.cuda)
+print('GPU count:', torch.cuda.device_count())
+
+for i in range(torch.cuda.device_count()):
+    print(f'GPU {i}:', torch.cuda.get_device_name(i))
+"
+echo
+
+# ------------------------------------------------------------
+# IMPORTANT:
+# DDP launch using torchrun
+#
+# 1 process = 1 GPU
+#
+# To scale later:
+# --nproc_per_node=4
+# --nproc_per_node=8
+# ------------------------------------------------------------
+
+echo "===== Running Multi-GPU DDP Benchmark ====="
+
+# Calculate a random port for PyTorhc. This is to ensure there is no port clashing on a shared compute node
+MASTER_PORT=$((20000 + ${PBS_JOBID%%.*} % 40000))
+
+torchrun --nproc_per_node=1 --master_port=$MASTER_PORT resnet50_singleNode_DDP_noCon.py
