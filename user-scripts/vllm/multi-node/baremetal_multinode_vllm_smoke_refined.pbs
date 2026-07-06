@@ -1,0 +1,921 @@
+#!/bin/bash
+#PBS -N baremetal_R3_2x2
+#PBS -P hpc_admin
+#PBS -q gpu_as
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -l place=scatter
+
+# ============================================================
+# Optional one-time setup: install Ray for the bare-metal workflow
+#
+# This block is NOT executed by the PBS job. It is a reference setup
+# procedure for creating the Ray environment used later by this script.
+#
+# Why a separate Ray environment is needed:
+# - The vllm/0.19.0 module provides the bare-metal vLLM executable and
+#   its Python environment.
+# - Ray is installed separately in a clean virtual environment so users
+#   can add or update Ray without modifying the system/module vLLM stack.
+# - During the PBS job, the Ray venv site-packages path is added to
+#   PYTHONPATH so the module-provided vLLM Python can import Ray.
+#
+# Reuse rule:
+# - Create this Ray venv once per compatible vLLM/Python stack.
+# - Reuse the same Ray venv for different models and BENCH_ROOT values.
+# - Rebuild/reinstall Ray only when the loaded vLLM module, Python version,
+#   Ray version requirement, or cluster software stack changes.
+#
+# Example Ray installation commands:
+#
+# module purge
+# module load vllm/0.19.0
+#
+# export ENV_ROOT="/home/pham0094/guidellm_vLLMBench"
+#
+# cd "$ENV_ROOT"
+# python3 -m venv --system-site-packages baremetal_ray
+# source baremetal_ray/bin/activate
+#
+# python -m pip install --upgrade pip setuptools wheel
+# python -m pip install --force-reinstall "ray[default]==2.56.0"
+#
+# Verification commands:
+#
+# ((baremetal_ray)) python -c "import ray; print(ray.__version__)"
+# 2.56.0
+#
+# ((baremetal_ray)) python -m ray.scripts.scripts --version
+# python -m ray.scripts.scripts, version 2.56.0
+#
+# ((baremetal_ray)) python -c "import google.protobuf; print('protobuf OK')" protobuf OK
+#
+# ((baremetal_ray)) python -c "import click, filelock, jsonschema, yaml, requests; print('core deps OK')" core deps OK
+# ============================================================
+
+
+# ============================================================
+# Required: multi-node GPU layout
+#
+# Enable exactly ONE PBS select line and keep the three variables below
+# consistent with that selection.
+#
+# Parallelization convention used by this script:
+# - Tensor parallelism is used within each node.
+# - Pipeline parallelism is used across nodes.
+#
+# Therefore:
+# - GPUS_PER_NODE = number of GPUs allocated on each node
+# - TP_SIZE       = tensor-parallel size; normally equal to GPUS_PER_NODE
+# - PP_SIZE       = pipeline-parallel size; normally equal to node count
+#
+# Keep mpiprocs=1:
+# - PBS launches one MPI process per allocated node.
+# - That process starts either one Ray head or one Ray worker.
+# - Ray/vLLM then manages the GPUs inside each node.
+#
+# ---- 2 nodes x 1 GPU each = 2 total GPUs ----
+#PBS -l select=2:ncpus=12:ngpus=2:mpiprocs=1
+export GPUS_PER_NODE=2
+export TP_SIZE=2
+export PP_SIZE=2
+#
+# ---- 2 nodes x 2 GPUs each = 4 total GPUs ----
+##PBS -l select=2:ncpus=24:ngpus=2:mpiprocs=1
+# export GPUS_PER_NODE=2
+# export TP_SIZE=2
+# export PP_SIZE=2
+#
+# Examples:
+# - 2x1 layout: TP_SIZE=1, PP_SIZE=2
+# - 2x2 layout: TP_SIZE=2, PP_SIZE=2
+#
+# For a different model:
+# - First check that the model supports the requested TP/PP layout.
+# - Then update the model ID in the vLLM launch command and smoke-test JSON.
+# - Do not change the Ray head/worker structure unless changing the cluster
+#   launch strategy itself.
+# ============================================================
+
+set -euo pipefail
+
+cd "${PBS_O_WORKDIR:-$HOME}" || exit 1
+
+echo "============================================================"
+echo "PBS job started"
+echo "Job ID:        ${PBS_JOBID:-unknown}"
+echo "Job name:      ${PBS_JOBNAME:-unknown}"
+echo "Submit dir:    ${PBS_O_WORKDIR:-unknown}"
+echo "Running host:  $(hostname)"
+echo "Date:          $(date)"
+echo "GPUS_PER_NODE: ${GPUS_PER_NODE}"
+echo "TP_SIZE:       ${TP_SIZE}"
+echo "PP_SIZE:       ${PP_SIZE}"
+echo "============================================================"
+
+# ------------------------------------------------------------
+# Required: load the bare-metal software stack
+#
+# vllm/0.19.0 provides the vLLM executable and the Python environment
+# used to launch the OpenAI-compatible API server.
+#
+# nvhpc/26.3 provides the known-good HPC-X OpenMPI installation used
+# with pbs_tmrsh for launching commands on allocated PBS nodes.
+# ------------------------------------------------------------
+module purge
+module load vllm/0.19.0
+module load nvhpc/26.3
+
+module list
+
+# ------------------------------------------------------------
+# Required: use HPC-X OpenMPI from the NVHPC module
+#
+# This matches the communication style used in the validated PyTorch DDP
+# workflow. The script later uses mpirun + pbs_tmrsh to execute setup
+# commands on each allocated node without relying on plain ssh.
+# ------------------------------------------------------------
+NVROOT=$(dirname "$(dirname "$(dirname "$(command -v nvfortran)")")")
+
+export PATH="${NVROOT}/comm_libs/hpcx/bin:${PATH}"
+export LD_LIBRARY_PATH="${NVROOT}/comm_libs/hpcx/lib:${LD_LIBRARY_PATH:-}"
+
+# ------------------------------------------------------------
+# User-configurable: shared project working directory
+#
+# This path must be visible from every allocated node. It stores model
+# cache, JIT/cache directories, vLLM logs, Ray logs, and run outputs for
+# this workflow.
+#
+# You may use a different BENCH_ROOT for different models or experiments.
+# This does NOT require reinstalling Ray as long as BAREMETAL_RAY_ENV below
+# still points to a compatible Ray venv.
+# ------------------------------------------------------------
+export BENCH_ROOT="/projects_vol/gp_hpcadmin/pham0094/BarMul"
+
+# ------------------------------------------------------------
+# Required: normalize CUDA_VISIBLE_DEVICES for bare-metal vLLM
+#
+# Some scheduler/module environments expose allocated GPUs as UUIDs.
+# This bare-metal vLLM stack expects integer GPU IDs, so this script sets
+# CUDA_VISIBLE_DEVICES explicitly from GPUS_PER_NODE.
+#
+# This must happen before running any vLLM command, including
+# `vllm --version`, because vLLM may parse CUDA_VISIBLE_DEVICES during
+# startup/import.
+# ------------------------------------------------------------
+if [[ "$GPUS_PER_NODE" -eq 1 ]]; then
+  export CUDA_VISIBLE_DEVICES=0
+elif [[ "$GPUS_PER_NODE" -eq 2 ]]; then
+  export CUDA_VISIBLE_DEVICES=0,1
+elif [[ "$GPUS_PER_NODE" -eq 4 ]]; then
+  export CUDA_VISIBLE_DEVICES=0,1,2,3
+elif [[ "$GPUS_PER_NODE" -eq 8 ]]; then
+  export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+else
+  echo "ERROR: Unsupported GPUS_PER_NODE=$GPUS_PER_NODE"
+  exit 1
+fi
+
+# ------------------------------------------------------------
+# Required: connect the Ray venv to the module-provided vLLM Python
+#
+# The bare-metal workflow uses two related Python contexts:
+#
+# - PYTHON_BIN:
+#   The Python interpreter provided by the loaded vllm/0.19.0 module.
+#   This is the environment that can import and run vLLM.
+#
+# - RAY_PYTHON_BIN:
+#   The Python interpreter inside the separately-created Ray virtual
+#   environment.
+#
+# Ray itself is installed in BAREMETAL_RAY_ENV, but vLLM needs to import
+# Ray when launched with `--distributed-executor-backend ray`. The key
+# step is therefore adding the Ray venv site-packages directory to
+# PYTHONPATH so the module-provided vLLM Python can import Ray.
+#
+# Reuse rule for different models:
+# - Keep BAREMETAL_RAY_ENV fixed if the vLLM module/Python/Ray versions
+#   remain compatible.
+# - Change BENCH_ROOT, RUN_TAG, model ID, TP_SIZE, and PP_SIZE as needed.
+# - Rebuild this Ray venv only when changing the underlying software stack.
+# ------------------------------------------------------------
+unset PYTHONNOUSERSITE || true
+
+export BAREMETAL_RAY_ENV="/home/pham0094/guidellm_vLLMBench/baremetal_ray"
+export RAY_PYTHON_BIN="$BAREMETAL_RAY_ENV/bin/python"
+export RAY_SITE_PACKAGES="$BAREMETAL_RAY_ENV/lib/python3.12/site-packages"
+
+if [[ ! -x "$RAY_PYTHON_BIN" ]]; then
+  echo "ERROR: Ray venv Python not found or not executable:"
+  echo "$RAY_PYTHON_BIN"
+  exit 1
+fi
+
+if [[ ! -d "$RAY_SITE_PACKAGES" ]]; then
+  echo "ERROR: Ray venv site-packages directory not found:"
+  echo "$RAY_SITE_PACKAGES"
+  exit 1
+fi
+
+# Make Ray importable to the module-provided vLLM Python.
+export PYTHONPATH="$RAY_SITE_PACKAGES:${PYTHONPATH:-}"
+
+export PYTHON_BIN="$(command -v python3 || true)"
+export VLLM_BIN="$(command -v vllm || true)"
+
+if [[ -z "$PYTHON_BIN" ]]; then
+  echo "ERROR: python3 not found after loading vllm/0.19.0"
+  exit 1
+fi
+
+if [[ -z "$VLLM_BIN" ]]; then
+  echo "ERROR: vllm executable not found after loading vllm/0.19.0"
+  exit 1
+fi
+
+echo "============================================================"
+echo "Executable check"
+echo "============================================================"
+echo "PYTHON_BIN:          $PYTHON_BIN"
+echo "VLLM_BIN:            $VLLM_BIN"
+echo "BAREMETAL_RAY_ENV:   $BAREMETAL_RAY_ENV"
+echo "RAY_PYTHON_BIN:      $RAY_PYTHON_BIN"
+echo "RAY_SITE_PACKAGES:   $RAY_SITE_PACKAGES"
+echo "CUDA_VISIBLE_DEVICES:$CUDA_VISIBLE_DEVICES"
+echo "PYTHONPATH:          ${PYTHONPATH:-unset}"
+echo "python version:"
+"$PYTHON_BIN" --version
+echo "Ray venv python version:"
+"$RAY_PYTHON_BIN" --version
+echo "vLLM version:"
+"$VLLM_BIN" --version || true
+echo "Checking Ray from Ray venv:"
+"$RAY_PYTHON_BIN" -c "import ray; print(ray.__version__)"
+echo "Checking whether module Python can import Ray via PYTHONPATH:"
+"$PYTHON_BIN" -c "import ray; print(ray.__version__)"
+
+# Ray CLI through the module-provided Python.
+#
+# Ray was installed in the separate Ray venv, but Ray workers launched for
+# vLLM must also be able to import the module-provided vLLM package. Since
+# PYTHONPATH already exposes Ray to the module Python, start Ray through
+# the module Python. This keeps the Ray workers and vLLM actors in the same
+# effective Python/module environment.
+export RAY_CMD="$PYTHON_BIN -m ray.scripts.scripts"
+
+echo "Ray command:"
+echo "$RAY_CMD"
+echo "Ray version:"
+$RAY_CMD --version || true
+echo "============================================================"
+
+# ------------------------------------------------------------
+# Required/cache: Hugging Face model cache
+#
+# HF_HOME controls where model metadata, tokenizer/config files, and
+# downloaded model weights are stored.
+# ------------------------------------------------------------
+export HF_HOME="$BENCH_ROOT/hf_home"
+
+# ------------------------------------------------------------
+# Required/cache: runtime and JIT cache directories
+#
+# These paths keep vLLM, PyTorch, Triton, FlashInfer, and temporary files
+# inside BENCH_ROOT instead of scattering them through default home/tmp
+# locations. Keeping them explicit makes runs easier to debug and clean.
+# ------------------------------------------------------------
+export XDG_CACHE_HOME="$BENCH_ROOT/xdg_cache"
+export VLLM_CACHE_ROOT="$BENCH_ROOT/vllm_cache"
+export FLASHINFER_WORKSPACE_DIR="$BENCH_ROOT/flashinfer_cache"
+export TORCHINDUCTOR_CACHE_DIR="$BENCH_ROOT/torchinductor_cache"
+export TRITON_CACHE_DIR="$BENCH_ROOT/triton_cache"
+export TMPDIR="$BENCH_ROOT/tmp"
+
+# ------------------------------------------------------------
+# Recommended: CPU threading control
+#
+# vLLM serving is GPU-focused here. Keeping OMP_NUM_THREADS small avoids
+# accidental CPU oversubscription on the Ray head/worker processes.
+# ------------------------------------------------------------
+export OMP_NUM_THREADS=1
+
+# ------------------------------------------------------------
+# Cluster-specific: NCCL / communication settings
+#
+# These settings follow the known-good multi-node communication setup for
+# this cluster and should normally be left unchanged.
+#
+# - NCCL_IB_DISABLE=0 enables InfiniBand/RDMA.
+# - TORCH_NCCL_ASYNC_ERROR_HANDLING=1 helps surface distributed failures.
+# - NCCL_DEBUG and NCCL_DEBUG_SUBSYS provide useful startup diagnostics.
+# - NCCL_IB_HCA explicitly selects the working HCAs and avoids the
+#   mlx5_bond_0 failure path observed during testing.
+#
+# Do not force Ethernet unless you are intentionally porting the script to
+# a cluster without working InfiniBand/RDMA.
+# ------------------------------------------------------------
+export NCCL_IB_DISABLE=0
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=INIT,NET,GRAPH
+
+export NCCL_IB_HCA=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_8,mlx5_9
+
+# ------------------------------------------------------------
+# Outputs: logs and per-run artifacts
+#
+# VLLM_LOG_DIR stores long-lived vLLM logs under BENCH_ROOT.
+# RUN_DIR stores this job's Ray logs, API responses, and smoke-test files.
+#
+# RUN_TAG includes TP/PP sizes and PBS_JOBID so repeated submissions do
+# not overwrite previous results.
+# ------------------------------------------------------------
+export VLLM_LOG_DIR="$BENCH_ROOT/logs"
+
+export RUN_TAG="baremetal_qwen2p5_7b_multinode_tp${TP_SIZE}_pp${PP_SIZE}_${PBS_JOBID:-manual}_$(date +%Y%m%d_%H%M%S)"
+export RUN_DIR="$BENCH_ROOT/results/$RUN_TAG"
+
+export RAY_LOG_DIR="$RUN_DIR/ray_logs"
+export VLLM_LOG_FILE="$VLLM_LOG_DIR/vllm_qwen2p5_7b_baremetal_multinode_tp${TP_SIZE}_pp${PP_SIZE}_${PBS_JOBID:-manual}.log"
+export MODELS_JSON="$RUN_DIR/models.json"
+export REQUEST_JSON="$RUN_DIR/request.json"
+export RESPONSE_JSON="$RUN_DIR/response.json"
+export RESPONSE_TXT="$RUN_DIR/response_text.txt"
+
+mkdir -p \
+  "$HF_HOME" \
+  "$XDG_CACHE_HOME" \
+  "$VLLM_CACHE_ROOT" \
+  "$FLASHINFER_WORKSPACE_DIR" \
+  "$TORCHINDUCTOR_CACHE_DIR" \
+  "$TRITON_CACHE_DIR" \
+  "$TMPDIR" \
+  "$VLLM_LOG_DIR" \
+  "$RUN_DIR" \
+  "$RAY_LOG_DIR" \
+  "$BENCH_ROOT/.cache/flashinfer"
+
+if [[ -z "${PBS_NODEFILE:-}" ]] || [[ ! -f "$PBS_NODEFILE" ]]; then
+  echo "ERROR: PBS_NODEFILE is not set or does not exist."
+  exit 1
+fi
+
+# ------------------------------------------------------------
+# Required: derive the allocated PBS node list
+#
+# PBS_NODEFILE is provided by the scheduler. With mpiprocs=1, it should
+# contain one entry per allocated node. The first node is used as the Ray
+# head; all remaining nodes become Ray workers.
+# ------------------------------------------------------------
+mapfile -t NODES < <(sort -u "$PBS_NODEFILE")
+
+NNODES="${#NODES[@]}"
+HEAD_NODE="${NODES[0]}"
+NPROCS=$(wc -l < "$PBS_NODEFILE")
+
+if [[ "$NNODES" -ne "$PP_SIZE" ]]; then
+  echo "ERROR: Allocated node count NNODES=$NNODES but PP_SIZE=$PP_SIZE."
+  echo "Allocated nodes:"
+  printf '  %s\n' "${NODES[@]}"
+  exit 1
+fi
+
+echo "============================================================"
+echo "PBS allocation"
+echo "============================================================"
+echo "NPROCS from PBS_NODEFILE: $NPROCS"
+echo "NNODES:                  $NNODES"
+echo "GPUS_PER_NODE:           $GPUS_PER_NODE"
+echo "NODES:"
+printf '  %s\n' "${NODES[@]}"
+echo "HEAD_NODE:               $HEAD_NODE"
+echo "============================================================"
+
+# ------------------------------------------------------------
+# Required: resolve the Ray head node IPv4 address
+#
+# Ray needs a clean IPv4 bootstrap address in the form IP:PORT. Avoid
+# generic `getent hosts` here because it may return IPv6 link-local
+# addresses such as fe80::..., which Ray address parsing may reject.
+#
+# If the resolved address uses the wrong network on another cluster,
+# replace HEAD_IP with the desired management/IPoIB hostname or IPv4.
+# ------------------------------------------------------------
+HEAD_IP="$(getent ahostsv4 "$HEAD_NODE" | awk '{print $1; exit}')"
+
+if [[ -z "$HEAD_IP" ]]; then
+  HEAD_IP="$(hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^[0-9]+\./ {print; exit}')"
+fi
+
+if [[ -z "$HEAD_IP" ]]; then
+  echo "ERROR: Could not resolve IPv4 address for head node: $HEAD_NODE"
+  exit 1
+fi
+
+export HEAD_IP
+
+# ------------------------------------------------------------
+# Required: derive a per-job Ray address and short temp path
+#
+# RAY_PORT is generated from PBS_JOBID to reduce accidental port collisions
+# when multiple users are running on the same cluster.
+#
+# RAY_TMP_BASE is kept under /tmp because Ray uses AF_UNIX sockets, whose
+# path length is limited. Long paths under RUN_DIR can exceed that limit.
+# ------------------------------------------------------------
+JOB_NUM=$(echo "${PBS_JOBID:-0}" | sed 's/[^0-9].*//')
+if [[ -z "$JOB_NUM" ]]; then
+  JOB_NUM=0
+fi
+
+export RAY_PORT=$((20000 + JOB_NUM % 40000))
+export RAY_ADDRESS="${HEAD_IP}:${RAY_PORT}"
+
+export RAY_TMP_BASE="/tmp/ray_${JOB_NUM}_${USER:-user}"
+
+# vLLM OpenAI-compatible API server.
+# The service listens on the Ray head node.
+export PORT=8000
+export SERVER_URL="http://${HEAD_IP}:${PORT}"
+
+echo "============================================================"
+echo "Multi-node NON-CONTAINERIZED vLLM configuration"
+echo "============================================================"
+echo "JOBID:                ${PBS_JOBID:-unknown}"
+echo "WORKDIR:              ${PBS_O_WORKDIR:-unknown}"
+echo "DATE:                 $(date)"
+echo "LAYOUT:               ${NNODES} nodes x ${GPUS_PER_NODE} GPUs"
+echo "TP_SIZE:              ${TP_SIZE}"
+echo "PP_SIZE:              ${PP_SIZE}"
+echo "TOTAL MODEL GPUS:     $(( TP_SIZE * PP_SIZE ))"
+echo "HEAD_NODE:            ${HEAD_NODE}"
+echo "HEAD_IP:              ${HEAD_IP}"
+echo "RAY_ADDRESS:          ${RAY_ADDRESS}"
+echo "RAY_TMP_BASE:         ${RAY_TMP_BASE}"
+echo "SERVER_URL:           ${SERVER_URL}"
+echo "BENCH_ROOT:           ${BENCH_ROOT}"
+echo "RUN_DIR:              ${RUN_DIR}"
+echo "VLLM_LOG_FILE:        ${VLLM_LOG_FILE}"
+echo "VLLM_BIN:             ${VLLM_BIN}"
+echo "PYTHON_BIN:           ${PYTHON_BIN}"
+echo "BAREMETAL_RAY_ENV:    ${BAREMETAL_RAY_ENV}"
+echo "RAY_PYTHON_BIN:       ${RAY_PYTHON_BIN}"
+echo "RAY_SITE_PACKAGES:    ${RAY_SITE_PACKAGES}"
+echo "RAY_CMD:              ${RAY_CMD}"
+echo "PYTHONPATH:           ${PYTHONPATH:-unset}"
+echo "PYTHONNOUSERSITE:     ${PYTHONNOUSERSITE:-unset}"
+echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
+echo "NCCL_IB_DISABLE:      ${NCCL_IB_DISABLE}"
+echo "NCCL_IB_HCA:          ${NCCL_IB_HCA}"
+echo "NCCL_DEBUG_SUBSYS:    ${NCCL_DEBUG_SUBSYS}"
+echo "NODES:                $(printf '%s ' "${NODES[@]}")"
+echo "============================================================"
+
+# ------------------------------------------------------------
+# Helper: run one command on one allocated PBS node
+#
+# This uses mpirun with pbs_tmrsh, matching the validated multi-node
+# communication style. The long list of `-x` flags forwards the module
+# environment, cache paths, Ray settings, CUDA settings, and NCCL settings
+# so every remote node sees the same runtime context.
+# ------------------------------------------------------------
+
+# Recommended: force PyTorch/Triton JIT extension builds to use GCC/G++.
+# In testing, NVHPC nvc/nvc++ caused compilation errors for these builds.
+export CC="$(command -v gcc)"
+export CXX="$(command -v g++)"
+
+run_on_node() {
+  local node="$1"
+  shift
+  local cmd="$*"
+
+  mpirun -np 1 \
+    -host "$node" \
+    --mca plm_rsh_agent pbs_tmrsh \
+    --bind-to none \
+    -x PATH \
+    -x LD_LIBRARY_PATH \
+    -x MANPATH \
+    -x MODULEPATH \
+    -x LOADEDMODULES \
+    -x _LMFILES_ \
+    -x BENCH_ROOT \
+    -x HF_HOME \
+    -x XDG_CACHE_HOME \
+    -x VLLM_CACHE_ROOT \
+    -x FLASHINFER_WORKSPACE_DIR \
+    -x TORCHINDUCTOR_CACHE_DIR \
+    -x TRITON_CACHE_DIR \
+    -x TMPDIR \
+    -x VLLM_LOG_DIR \
+    -x RUN_DIR \
+    -x RAY_LOG_DIR \
+    -x VLLM_LOG_FILE \
+    -x VLLM_BIN \
+    -x PYTHON_BIN \
+    -x BAREMETAL_RAY_ENV \
+    -x RAY_PYTHON_BIN \
+    -x RAY_SITE_PACKAGES \
+    -x PYTHONPATH \
+    -x RAY_CMD \
+    -x HEAD_IP \
+    -x RAY_PORT \
+    -x RAY_ADDRESS \
+    -x RAY_TMP_BASE \
+    -x PORT \
+    -x SERVER_URL \
+    -x CUDA_VISIBLE_DEVICES \
+    -x NCCL_IB_DISABLE \
+    -x NCCL_DEBUG \
+    -x NCCL_DEBUG_SUBSYS \
+    -x NCCL_IB_HCA \
+    -x TORCH_NCCL_ASYNC_ERROR_HANDLING \
+    -x OMP_NUM_THREADS \
+    -x CC \
+    -x CXX \
+    bash -lc "$cmd"
+}
+
+# ------------------------------------------------------------
+# Recommended: cleanup handler
+#
+# On normal exit or failure, stop the vLLM server and force-stop Ray on
+# every allocated node. This prevents stale Ray processes from interfering
+# with the next job submission.
+# ------------------------------------------------------------
+VLLM_PID=""
+
+cleanup() {
+  echo "============================================================"
+  echo "Cleaning up vLLM and Ray"
+  echo "Date: $(date)"
+  echo "============================================================"
+
+  if [[ -n "${VLLM_PID:-}" ]] && kill -0 "$VLLM_PID" 2>/dev/null; then
+    echo "Stopping vLLM API server..."
+    kill -TERM "-$VLLM_PID" 2>/dev/null || kill -TERM "$VLLM_PID" 2>/dev/null || true
+    sleep 5
+
+    if kill -0 "$VLLM_PID" 2>/dev/null; then
+      echo "vLLM still running; sending KILL..."
+      kill -KILL "-$VLLM_PID" 2>/dev/null || kill -KILL "$VLLM_PID" 2>/dev/null || true
+    fi
+  fi
+
+  for node in "${NODES[@]}"; do
+    echo "Stopping Ray on $node ..."
+    run_on_node "$node" "$RAY_CMD stop --force" \
+      > "$RAY_LOG_DIR/ray_stop_${node}.log" 2>&1 || true
+  done
+
+  echo "Cleanup complete."
+}
+
+trap cleanup EXIT
+
+# ------------------------------------------------------------
+# Recommended: pre-clean stale Ray processes
+#
+# This makes repeated job submissions safer. It is especially useful while
+# iterating on model/layout settings, because an earlier failed job may
+# leave Ray processes behind on the allocated nodes.
+# ------------------------------------------------------------
+# ------------------------------------------------------------
+echo "============================================================"
+echo "Stopping any stale Ray processes"
+echo "============================================================"
+
+for node in "${NODES[@]}"; do
+  echo "Pre-clean Ray on $node ..."
+  run_on_node "$node" "$RAY_CMD stop --force" \
+    > "$RAY_LOG_DIR/ray_prestop_${node}.log" 2>&1 || true
+done
+
+sleep 3
+
+# ------------------------------------------------------------
+# Recommended: sanity-check every allocated node
+#
+# This confirms that each node can see the requested GPUs and that the
+# module Python can import both Ray and vLLM before the Ray cluster starts.
+# ------------------------------------------------------------
+echo "============================================================"
+echo "Checking GPU visibility and Ray import on each allocated node"
+echo "============================================================"
+
+for node in "${NODES[@]}"; do
+  echo "---------------- $node ----------------"
+  run_on_node "$node" "
+    hostname
+    echo CUDA_VISIBLE_DEVICES=\${CUDA_VISIBLE_DEVICES:-unset}
+    echo PYTHONPATH=\${PYTHONPATH:-unset}
+    echo PYTHONNOUSERSITE=\${PYTHONNOUSERSITE:-unset}
+    nvidia-smi -L
+    '$PYTHON_BIN' -c 'import ray; print(ray.__version__)'
+    '$PYTHON_BIN' -c 'import vllm; print("vllm import OK")'
+  " || true
+done
+
+# ------------------------------------------------------------
+# Required: start the Ray head on the first allocated node
+#
+# The head owns the Ray global control service and advertises RAY_ADDRESS.
+# vLLM is launched later from this same head node address.
+# ------------------------------------------------------------
+# ------------------------------------------------------------
+echo "============================================================"
+echo "Starting Ray head on $HEAD_NODE"
+echo "HEAD_IP:     $HEAD_IP"
+echo "RAY_PORT:    $RAY_PORT"
+echo "RAY_ADDRESS: $RAY_ADDRESS"
+echo "============================================================"
+
+run_on_node "$HEAD_NODE" "
+  export VLLM_HOST_IP='$HEAD_IP'
+
+  rm -rf '$RAY_TMP_BASE/head'
+  mkdir -p '$RAY_TMP_BASE/head'
+
+  setsid -f $RAY_CMD start \
+    --head \
+    --node-ip-address='$HEAD_IP' \
+    --port='$RAY_PORT' \
+    --num-gpus='$GPUS_PER_NODE' \
+    --temp-dir='$RAY_TMP_BASE/head' \
+    --disable-usage-stats \
+    --block \
+    > '$RAY_LOG_DIR/ray_head_${HEAD_NODE}.log' 2>&1 < /dev/null
+"
+
+sleep 10
+
+# ------------------------------------------------------------
+# Required: start one Ray worker on every remaining allocated node
+#
+# Each worker joins the head through RAY_ADDRESS and advertises the number
+# of GPUs assigned to that node through --num-gpus.
+# ------------------------------------------------------------
+# ------------------------------------------------------------
+echo "============================================================"
+echo "Starting Ray workers"
+echo "============================================================"
+
+for node in "${NODES[@]}"; do
+  if [[ "$node" == "$HEAD_NODE" ]]; then
+    continue
+  fi
+
+  NODE_IP="$(getent ahostsv4 "$node" | awk '{print $1; exit}')"
+
+  if [[ -z "$NODE_IP" ]]; then
+    echo "ERROR: Could not resolve IPv4 address for worker node: $node"
+    exit 1
+  fi
+
+  echo "Starting Ray worker on $node, IP=$NODE_IP"
+
+  run_on_node "$node" "
+    export VLLM_HOST_IP='$NODE_IP'
+
+    rm -rf '$RAY_TMP_BASE/$node'
+    mkdir -p '$RAY_TMP_BASE/$node'
+
+    setsid -f $RAY_CMD start \
+      --address='$RAY_ADDRESS' \
+      --node-ip-address='$NODE_IP' \
+      --num-gpus='$GPUS_PER_NODE' \
+      --temp-dir='$RAY_TMP_BASE/$node' \
+      --disable-usage-stats \
+      --block \
+      > '$RAY_LOG_DIR/ray_worker_${node}.log' 2>&1 < /dev/null
+  "
+done
+
+sleep 20
+
+# ------------------------------------------------------------
+# Required/debug: wait for the Ray cluster to become healthy
+# ------------------------------------------------------------
+echo "============================================================"
+echo "Checking Ray cluster status with retries"
+echo "============================================================"
+
+# Ray/GCS startup is asynchronous, so this section retries `ray status`
+# instead of failing the job on an early transient timeout.
+#
+# Check `$RUN_DIR/ray_status.txt` after the run. For a 2-node x 1-GPU job,
+# Ray should report 2 active nodes and 2 total GPUs. If Ray sees too few
+# GPUs, vLLM may hang while waiting for a placement group.
+RAY_READY=0
+RAY_STATUS_MAX_ATTEMPTS=24
+RAY_STATUS_SLEEP_SEC=5
+
+for attempt in $(seq 1 "$RAY_STATUS_MAX_ATTEMPTS"); do
+  echo "Ray status attempt ${attempt}/${RAY_STATUS_MAX_ATTEMPTS}..."
+
+  if run_on_node "$HEAD_NODE" "$RAY_CMD status --address='$RAY_ADDRESS'"       | tee "$RUN_DIR/ray_status_attempt_${attempt}.txt"; then
+    echo "Ray status succeeded on attempt ${attempt}."
+    cp "$RUN_DIR/ray_status_attempt_${attempt}.txt" "$RUN_DIR/ray_status.txt"
+    RAY_READY=1
+    break
+  fi
+
+  echo "Ray status failed on attempt ${attempt}; waiting ${RAY_STATUS_SLEEP_SEC}s before retry..."
+  sleep "$RAY_STATUS_SLEEP_SEC"
+done
+
+if [[ "$RAY_READY" -ne 1 ]]; then
+  echo "ERROR: Ray cluster did not become ready after ${RAY_STATUS_MAX_ATTEMPTS} attempts."
+  echo "Ray head log:"
+  tail -n 160 "$RAY_LOG_DIR/ray_head_${HEAD_NODE}.log" || true
+
+  for node in "${NODES[@]}"; do
+    if [[ "$node" != "$HEAD_NODE" ]]; then
+      echo "Ray worker log for $node:"
+      tail -n 160 "$RAY_LOG_DIR/ray_worker_${node}.log" || true
+    fi
+  done
+
+  exit 1
+fi
+
+echo "============================================================"
+echo "Expected Ray resources"
+echo "============================================================"
+echo "For this run, Ray should show:"
+echo "  Active nodes: ${NNODES}"
+echo "  Total GPUs:   $(( NNODES * GPUS_PER_NODE ))"
+echo "If Ray shows only 1 GPU for a 2-node run, vLLM will hang waiting"
+echo "for a placement group."
+echo "============================================================"
+
+# ------------------------------------------------------------
+# Required: launch the vLLM server on the Ray head node
+#
+# User-configurable model setting:
+# - Replace Qwen/Qwen2.5-7B-Instruct with another model ID when needed.
+# - Also update the smoke-test JSON model field below to match.
+#
+# Layout setting:
+# - TP_SIZE controls tensor parallelism within each node.
+# - PP_SIZE controls pipeline parallelism across nodes.
+# - The product TP_SIZE * PP_SIZE should match the number of GPUs vLLM
+#   should use for the model.
+#
+# Do not remove `--distributed-executor-backend ray` for multi-node runs.
+# ------------------------------------------------------------
+echo "============================================================"
+echo "Launching multi-node NON-CONTAINERIZED vLLM server"
+echo "Endpoint:      $SERVER_URL"
+echo "vLLM log file: $VLLM_LOG_FILE"
+echo "============================================================"
+
+setsid bash -lc "
+  export VLLM_HOST_IP='$HEAD_IP'
+
+  '$VLLM_BIN' serve Qwen/Qwen2.5-7B-Instruct \
+    --host 0.0.0.0 \
+    --port '$PORT' \
+    --tensor-parallel-size '$TP_SIZE' \
+    --pipeline-parallel-size '$PP_SIZE' \
+    --distributed-executor-backend ray \
+    --dtype auto
+" > "$VLLM_LOG_FILE" 2>&1 &
+
+VLLM_PID=$!
+
+echo "vLLM server PID: $VLLM_PID"
+echo "vLLM log file:   $VLLM_LOG_FILE"
+
+# ------------------------------------------------------------
+# Required: wait for vLLM API readiness
+#
+# Do not send requests until `/v1/models` succeeds. If the server exits or
+# times out, print recent vLLM logs and Ray status to make debugging easier.
+# ------------------------------------------------------------
+# ------------------------------------------------------------
+echo "============================================================"
+echo "Waiting for vLLM API readiness"
+echo "============================================================"
+
+READY=0
+
+for i in $(seq 1 900); do
+  if curl -fsS "$SERVER_URL/v1/models" > "$MODELS_JSON" 2>/dev/null; then
+    READY=1
+    echo "vLLM server is ready after $i check(s)."
+    break
+  fi
+
+  if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+    echo "ERROR: vLLM server exited before becoming ready."
+    echo "Last 200 lines of vLLM log:"
+    tail -n 200 "$VLLM_LOG_FILE" || true
+
+    echo "Ray status:"
+    run_on_node "$HEAD_NODE" "$RAY_CMD status --address='$RAY_ADDRESS'" || true
+
+    exit 1
+  fi
+
+  if (( i % 30 == 0 )); then
+    echo "Still waiting... check $i"
+    echo "Last 40 lines of vLLM log:"
+    tail -n 40 "$VLLM_LOG_FILE" || true
+  fi
+
+  sleep 2
+done
+
+if [[ "$READY" -ne 1 ]]; then
+  echo "ERROR: vLLM server did not become ready in time."
+  echo "Last 200 lines of vLLM log:"
+  tail -n 200 "$VLLM_LOG_FILE" || true
+
+  echo "Ray status:"
+  run_on_node "$HEAD_NODE" "$RAY_CMD status --address='$RAY_ADDRESS'" || true
+
+  exit 1
+fi
+
+echo "Model list saved to:"
+echo "$MODELS_JSON"
+
+# ------------------------------------------------------------
+# Optional: send one smoke-test prompt to the hosted model
+#
+# This verifies that the OpenAI-compatible chat/completions endpoint works
+# after the distributed vLLM server becomes ready. For another model, keep
+# this JSON `"model"` field consistent with the model passed to vLLM serve.
+# ------------------------------------------------------------
+cat > "$REQUEST_JSON" <<'EOF'
+{
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me how LLM works in simple terms."
+    }
+  ],
+  "max_tokens": 256,
+  "temperature": 0
+}
+EOF
+
+echo "============================================================"
+echo "Sending smoke-test prompt"
+echo "Request JSON:  $REQUEST_JSON"
+echo "Response JSON: $RESPONSE_JSON"
+echo "============================================================"
+
+curl -fsS "$SERVER_URL/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d @"$REQUEST_JSON" \
+  | tee "$RESPONSE_JSON"
+
+echo
+echo "============================================================"
+echo "Extracting assistant response text"
+echo "============================================================"
+
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$RESPONSE_JSON" "$RESPONSE_TXT" <<'PY'
+import json
+import sys
+
+response_path = sys.argv[1]
+text_path = sys.argv[2]
+
+with open(response_path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+text = data["choices"][0]["message"]["content"]
+
+print(text)
+
+with open(text_path, "w", encoding="utf-8") as f:
+    f.write(text)
+    f.write("\n")
+PY
+
+  echo
+  echo "Assistant response text saved to:"
+  echo "$RESPONSE_TXT"
+else
+  echo "python3 not found on host; raw JSON response is saved instead:"
+  echo "$RESPONSE_JSON"
+fi
+
+echo "============================================================"
+echo "Smoke test completed successfully"
+echo "RUN_DIR:       $RUN_DIR"
+echo "Ray status:    $RUN_DIR/ray_status.txt"
+echo "Ray logs:      $RAY_LOG_DIR"
+echo "vLLM log:      $VLLM_LOG_FILE"
+echo "Response JSON: $RESPONSE_JSON"
+echo "Date:          $(date)"
+echo "============================================================"
