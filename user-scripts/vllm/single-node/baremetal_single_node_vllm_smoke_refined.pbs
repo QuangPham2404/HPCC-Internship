@@ -2,8 +2,8 @@
 #PBS -N host_model_baremetal_test
 #PBS -j oe
 #PBS -l walltime=01:30:00
-#PBS -P hpc_admin
-#PBS -q gpu_as
+#PBS -P <project>
+#PBS -q <queue>
 
 # ============================================================
 # GPU toggle section
@@ -163,7 +163,7 @@ echo "Final CUDA_VISIBLE_DEVICES:    $CUDA_VISIBLE_DEVICES"
 # ------------------------------------------------------------
 # Project working directory on large storage
 # ------------------------------------------------------------
-export BENCH_ROOT="/projects_vol/gp_hpcadmin/pham0094/BarSingle"
+export BENCH_ROOT=<path>
 
 # ------------------------------------------------------------
 # Hugging Face cache
