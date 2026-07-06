@@ -1,0 +1,467 @@
+#!/bin/bash
+#PBS -N baremetal_R150_4GPU
+#PBS -j oe
+#PBS -l walltime=01:30:00
+#PBS -P hpc_admin
+#PBS -q gpu_as
+
+# ============================================================
+# GPU toggle section
+#
+# Enable exactly ONE of the following select lines.
+# Also set TP_SIZE below to match ngpus.
+#
+# ---- 1 GPU run ----
+##PBS -l select=1:ncpus=16:mem=64gb:ngpus=1
+#export TP_SIZE=1
+#
+# ---- 2 GPU run ----
+##PBS -l select=1:ncpus=16:mem=96gb:ngpus=2
+#export TP_SIZE=2
+#
+# ---- 4 GPU run ----
+#PBS -l select=1:ncpus=16:mem=128gb:ngpus=4
+export TP_SIZE=4
+#
+# Notes:
+# - Lines starting with "#PBS" are active PBS directives.
+# - Lines starting with "##PBS" are ignored comments.
+# - For Qwen/Qwen2.5-7B-Instruct, TP_SIZE=1,2,4 are valid.
+# - Do NOT use TP_SIZE=8 for this model.
+# ============================================================
+
+set -euo pipefail
+
+echo "============================================================"
+echo "PBS job started"
+echo "Job ID:        ${PBS_JOBID:-unknown}"
+echo "Job name:      ${PBS_JOBNAME:-unknown}"
+echo "Submit dir:    ${PBS_O_WORKDIR:-unknown}"
+echo "Running host:  $(hostname)"
+echo "Date:          $(date)"
+echo "TP_SIZE:       ${TP_SIZE}"
+echo "============================================================"
+
+# Go back to the directory where qsub was called from.
+cd "${PBS_O_WORKDIR:-$HOME}"
+
+# ------------------------------------------------------------
+# Load non-containerized vLLM software stack
+#
+# Do NOT load Apptainer/gocryptfs/squashfuse here.
+# Those are only needed for the containerized workflow.
+# ------------------------------------------------------------
+export TERM=xterm
+export MODULES_PAGER=cat
+
+module purge
+module load vllm/0.19.0
+
+# Optional: print loaded modules for reproducibility.
+module list
+
+# ------------------------------------------------------------
+# Fix CUDA_VISIBLE_DEVICES format for bare-metal vLLM.
+#
+# Some PBS/module environments expose GPUs as UUIDs:
+#   CUDA_VISIBLE_DEVICES=GPU-xxxx,GPU-yyyy,...
+#
+# This bare-metal vLLM stack expects integer GPU IDs:
+#   CUDA_VISIBLE_DEVICES=0,1,2,3
+#
+# If CUDA_VISIBLE_DEVICES is UUID-based, vLLM may crash with:
+#   ValueError: invalid literal for int() with base 10: 'GPU-...'
+#
+# This block keeps the script compatible with TP_SIZE=1,2,4.
+# If CUDA_VISIBLE_DEVICES is already integer-based, it keeps the first
+# TP_SIZE entries. If it is UUID-based, it maps UUIDs to integer GPU IDs.
+# If it is unset, it assumes an exclusive allocated node and uses:
+#   0
+#   0,1
+#   0,1,2,3
+# depending on TP_SIZE.
+# ------------------------------------------------------------
+ORIGINAL_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}"
+
+echo "Original CUDA_VISIBLE_DEVICES: ${ORIGINAL_CUDA_VISIBLE_DEVICES:-unset}"
+
+if [[ -z "$ORIGINAL_CUDA_VISIBLE_DEVICES" ]]; then
+  echo "CUDA_VISIBLE_DEVICES is unset. Assuming exclusive allocated node."
+  if [[ "$TP_SIZE" -eq 1 ]]; then
+    export CUDA_VISIBLE_DEVICES=0
+  elif [[ "$TP_SIZE" -eq 2 ]]; then
+    export CUDA_VISIBLE_DEVICES=0,1
+  elif [[ "$TP_SIZE" -eq 4 ]]; then
+    export CUDA_VISIBLE_DEVICES=0,1,2,3
+  else
+    echo "ERROR: Unsupported TP_SIZE=$TP_SIZE"
+    exit 1
+  fi
+
+elif [[ "$ORIGINAL_CUDA_VISIBLE_DEVICES" == GPU-* ]]; then
+  echo "Detected UUID-based CUDA_VISIBLE_DEVICES."
+  echo "Converting allocated GPU UUIDs to integer GPU indices..."
+
+  NEW_CUDA_VISIBLE_DEVICES=""
+  COUNT=0
+
+  IFS=',' read -ra GPU_UUIDS <<< "$ORIGINAL_CUDA_VISIBLE_DEVICES"
+
+  for GPU_UUID in "${GPU_UUIDS[@]}"; do
+    GPU_INDEX="$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader | \
+      awk -F',' -v uuid="$GPU_UUID" '{
+        gsub(/^[ \t]+|[ \t]+$/, "", $1);
+        gsub(/^[ \t]+|[ \t]+$/, "", $2);
+        if ($2 == uuid) print $1;
+      }')"
+
+    if [[ -z "$GPU_INDEX" ]]; then
+      echo "ERROR: Could not map GPU UUID to index: $GPU_UUID" >&2
+      exit 1
+    fi
+
+    if [[ -z "$NEW_CUDA_VISIBLE_DEVICES" ]]; then
+      NEW_CUDA_VISIBLE_DEVICES="$GPU_INDEX"
+    else
+      NEW_CUDA_VISIBLE_DEVICES="$NEW_CUDA_VISIBLE_DEVICES,$GPU_INDEX"
+    fi
+
+    COUNT=$((COUNT + 1))
+    if [[ "$COUNT" -ge "$TP_SIZE" ]]; then
+      break
+    fi
+  done
+
+  export CUDA_VISIBLE_DEVICES="$NEW_CUDA_VISIBLE_DEVICES"
+
+else
+  echo "Detected integer/list CUDA_VISIBLE_DEVICES."
+  echo "Keeping the first TP_SIZE=$TP_SIZE visible GPU entries."
+
+  NEW_CUDA_VISIBLE_DEVICES=""
+  COUNT=0
+
+  IFS=',' read -ra GPU_IDS <<< "$ORIGINAL_CUDA_VISIBLE_DEVICES"
+
+  for GPU_ID in "${GPU_IDS[@]}"; do
+    GPU_ID="$(echo "$GPU_ID" | xargs)"
+
+    if [[ -z "$NEW_CUDA_VISIBLE_DEVICES" ]]; then
+      NEW_CUDA_VISIBLE_DEVICES="$GPU_ID"
+    else
+      NEW_CUDA_VISIBLE_DEVICES="$NEW_CUDA_VISIBLE_DEVICES,$GPU_ID"
+    fi
+
+    COUNT=$((COUNT + 1))
+    if [[ "$COUNT" -ge "$TP_SIZE" ]]; then
+      break
+    fi
+  done
+
+  export CUDA_VISIBLE_DEVICES="$NEW_CUDA_VISIBLE_DEVICES"
+fi
+
+echo "Final CUDA_VISIBLE_DEVICES:    $CUDA_VISIBLE_DEVICES"
+
+# ------------------------------------------------------------
+# Project working directory on large storage
+# ------------------------------------------------------------
+export BENCH_ROOT="/projects_vol/gp_hpcadmin/pham0094/guidellm_vLLMBench"
+
+# ------------------------------------------------------------
+# Hugging Face cache
+# ------------------------------------------------------------
+export HF_HOME="$BENCH_ROOT/hf_home"
+
+# ------------------------------------------------------------
+# Runtime/JIT/cache directories
+# ------------------------------------------------------------
+export XDG_CACHE_HOME="$BENCH_ROOT/xdg_cache"
+export VLLM_CACHE_ROOT="$BENCH_ROOT/vllm_cache"
+export FLASHINFER_WORKSPACE_DIR="$BENCH_ROOT/flashinfer_cache"
+export TORCHINDUCTOR_CACHE_DIR="$BENCH_ROOT/torchinductor_cache"
+export TRITON_CACHE_DIR="$BENCH_ROOT/triton_cache"
+export TMPDIR="$BENCH_ROOT/tmp"
+
+# ------------------------------------------------------------
+# Avoid host/user Python package contamination
+# ------------------------------------------------------------
+export PYTHONNOUSERSITE=1
+
+# ------------------------------------------------------------
+# CPU threading control
+# ------------------------------------------------------------
+export OMP_NUM_THREADS=1
+
+# ------------------------------------------------------------
+# Logs and local run outputs
+# ------------------------------------------------------------
+export VLLM_LOG_DIR="$BENCH_ROOT/logs"
+
+export RUN_TAG="baremetal_qwen2p5_7b_tp${TP_SIZE}_guidellm_${PBS_JOBID:-manual}_$(date +%Y%m%d_%H%M%S)"
+export RUN_DIR="$PWD/$RUN_TAG"
+
+export VLLM_LOG_FILE="$VLLM_LOG_DIR/vllm_qwen2p5_7b_baremetal_tp${TP_SIZE}_${PBS_JOBID:-manual}.log"
+export MODELS_JSON="$RUN_DIR/models.json"
+export REQUEST_JSON="$RUN_DIR/request.json"
+export RESPONSE_JSON="$RUN_DIR/response.json"
+export RESPONSE_TXT="$RUN_DIR/response_text.txt"
+export GUIDELLM_LOG="$RUN_DIR/guidellm_benchmark.log"
+
+mkdir -p \
+  "$HF_HOME" \
+  "$XDG_CACHE_HOME" \
+  "$VLLM_CACHE_ROOT" \
+  "$FLASHINFER_WORKSPACE_DIR" \
+  "$TORCHINDUCTOR_CACHE_DIR" \
+  "$TRITON_CACHE_DIR" \
+  "$TMPDIR" \
+  "$VLLM_LOG_DIR" \
+  "$RUN_DIR" \
+  "$BENCH_ROOT/.cache/flashinfer"
+
+echo "============================================================"
+echo "Starting NON-CONTAINERIZED vLLM + GuideLLM benchmark workflow"
+echo "Host:                       $(hostname)"
+echo "BENCH_ROOT:                 $BENCH_ROOT"
+echo "HF_HOME:                    $HF_HOME"
+echo "XDG_CACHE_HOME:             $XDG_CACHE_HOME"
+echo "VLLM_CACHE_ROOT:            $VLLM_CACHE_ROOT"
+echo "FLASHINFER_WORKSPACE_DIR:   $FLASHINFER_WORKSPACE_DIR"
+echo "TORCHINDUCTOR_CACHE_DIR:    $TORCHINDUCTOR_CACHE_DIR"
+echo "TRITON_CACHE_DIR:           $TRITON_CACHE_DIR"
+echo "TMPDIR:                     $TMPDIR"
+echo "PYTHONNOUSERSITE:           $PYTHONNOUSERSITE"
+echo "OMP_NUM_THREADS:            $OMP_NUM_THREADS"
+echo "PBS working dir:            $PWD"
+echo "RUN_DIR:                    $RUN_DIR"
+echo "vLLM log file:              $VLLM_LOG_FILE"
+echo "GuideLLM log file:          $GUIDELLM_LOG"
+echo "CUDA_VISIBLE_DEVICES:       ${CUDA_VISIBLE_DEVICES:-unset}"
+echo "vLLM path:                  $(which vllm)"
+echo "============================================================"
+
+echo "Checking GPU visibility on host:"
+nvidia-smi -L || true
+
+VISIBLE_GPU_COUNT="$(echo "$CUDA_VISIBLE_DEVICES" | awk -F',' '{print NF}')"
+echo "Visible GPU count according to CUDA_VISIBLE_DEVICES: $VISIBLE_GPU_COUNT"
+
+if [[ "$VISIBLE_GPU_COUNT" -lt "$TP_SIZE" ]]; then
+  echo "ERROR: TP_SIZE=$TP_SIZE but CUDA_VISIBLE_DEVICES only contains $VISIBLE_GPU_COUNT GPU(s)."
+  echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+  exit 1
+fi
+
+# ------------------------------------------------------------
+# Start vLLM server in the background
+# ------------------------------------------------------------
+export PORT=8000
+export SERVER_URL="http://127.0.0.1:${PORT}"
+
+echo "============================================================"
+echo "Launching bare-metal vLLM server in background"
+echo "Endpoint: $SERVER_URL"
+echo "============================================================"
+
+setsid vllm serve Qwen/Qwen2.5-7B-Instruct \
+  --host 0.0.0.0 \
+  --port "$PORT" \
+  --tensor-parallel-size "$TP_SIZE" \
+  --dtype auto \
+  > "$VLLM_LOG_FILE" 2>&1 &
+
+VLLM_PID=$!
+
+cleanup() {
+  echo "============================================================"
+  echo "Cleaning up vLLM server"
+  echo "vLLM PID: ${VLLM_PID:-unset}"
+  echo "============================================================"
+
+  if [[ -n "${VLLM_PID:-}" ]] && kill -0 "$VLLM_PID" 2>/dev/null; then
+    echo "Sending TERM to vLLM process group..."
+    kill -TERM "-$VLLM_PID" 2>/dev/null || kill -TERM "$VLLM_PID" 2>/dev/null || true
+    sleep 5
+
+    if kill -0 "$VLLM_PID" 2>/dev/null; then
+      echo "vLLM still running; sending KILL..."
+      kill -KILL "-$VLLM_PID" 2>/dev/null || kill -KILL "$VLLM_PID" 2>/dev/null || true
+    fi
+  fi
+
+  echo "Cleanup complete."
+}
+
+trap cleanup EXIT
+
+echo "vLLM server PID: $VLLM_PID"
+echo "vLLM log file:   $VLLM_LOG_FILE"
+
+# ------------------------------------------------------------
+# Wait for the server to become ready
+# ------------------------------------------------------------
+echo "============================================================"
+echo "Waiting for vLLM API readiness"
+echo "============================================================"
+
+READY=0
+for i in $(seq 1 900); do
+  if curl -fsS "$SERVER_URL/v1/models" > "$MODELS_JSON" 2>/dev/null; then
+    READY=1
+    echo "vLLM server is ready after $i check(s)."
+    break
+  fi
+
+  if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+    echo "ERROR: vLLM server exited before becoming ready."
+    echo "Last 120 lines of vLLM log:"
+    tail -n 120 "$VLLM_LOG_FILE" || true
+    exit 1
+  fi
+
+  if (( i % 30 == 0 )); then
+    echo "Still waiting... check $i"
+    echo "Last 20 lines of vLLM log:"
+    tail -n 20 "$VLLM_LOG_FILE" || true
+  fi
+
+  sleep 2
+done
+
+if [[ "$READY" -ne 1 ]]; then
+  echo "ERROR: vLLM server did not become ready in time."
+  echo "Last 120 lines of vLLM log:"
+  tail -n 120 "$VLLM_LOG_FILE" || true
+  exit 1
+fi
+
+echo "Model list saved to:"
+echo "$MODELS_JSON"
+
+# ------------------------------------------------------------
+# Optional sanity prompt before benchmark
+# ------------------------------------------------------------
+cat > "$REQUEST_JSON" <<'EOF'
+{
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me how LLM works in simple terms."
+    }
+  ],
+  "max_tokens": 256,
+  "temperature": 0
+}
+EOF
+
+echo "============================================================"
+echo "Sending single-prompt sanity test before GuideLLM"
+echo "Request JSON:  $REQUEST_JSON"
+echo "Response JSON: $RESPONSE_JSON"
+echo "============================================================"
+
+curl -fsS "$SERVER_URL/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d @"$REQUEST_JSON" \
+  | tee "$RESPONSE_JSON"
+
+echo
+echo "============================================================"
+echo "Extracting assistant response text"
+echo "============================================================"
+
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$RESPONSE_JSON" "$RESPONSE_TXT" <<'PY'
+import json
+import sys
+
+response_path = sys.argv[1]
+text_path = sys.argv[2]
+
+with open(response_path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+text = data["choices"][0]["message"]["content"]
+
+print(text)
+
+with open(text_path, "w", encoding="utf-8") as f:
+    f.write(text)
+    f.write("\n")
+PY
+  echo
+  echo "Assistant response text saved to:"
+  echo "$RESPONSE_TXT"
+else
+  echo "python3 not found on host; raw JSON response is saved instead:"
+  echo "$RESPONSE_JSON"
+fi
+
+# ------------------------------------------------------------
+# Activate GuideLLM client environment
+# ------------------------------------------------------------
+echo "============================================================"
+echo "Activating GuideLLM environment"
+echo "============================================================"
+
+if [[ ! -f "$HOME/guidellm_vLLMBench/start_guidellm_env.sh" ]]; then
+  echo "ERROR: GuideLLM startup script not found:"
+  echo "$HOME/guidellm_vLLMBench/start_guidellm_env.sh"
+  exit 1
+fi
+
+# This script may module purge/load internally.
+# That is okay because vLLM is already running in the background.
+source "$HOME/guidellm_vLLMBench/start_guidellm_env.sh"
+
+echo "GuideLLM executable:"
+which guidellm
+
+echo "GuideLLM version:"
+guidellm --version || true
+
+echo "Checking endpoint again after GuideLLM env activation:"
+curl -fsS "$SERVER_URL/v1/models" >/dev/null
+
+# ------------------------------------------------------------
+# Run GuideLLM benchmark
+# ------------------------------------------------------------
+echo "============================================================"
+echo "Running GuideLLM benchmark"
+echo "Output location: current PBS working directory / RUN_DIR"
+echo "RUN_DIR: $RUN_DIR"
+echo "============================================================"
+
+cd "$RUN_DIR"
+
+# Keep this command aligned with the currently validated GuideLLM CLI.
+# If the installed CLI changes later, check:
+#   guidellm benchmark --help
+
+# Variables
+export RATE=150
+export DURATION=300
+
+guidellm benchmark \
+  --target "$SERVER_URL" \
+  --rate-type constant \
+  --rate "$RATE" \
+  --max-seconds "$DURATION" \
+  --data "kind=synthetic_text,prompt_tokens=512,output_tokens=256" \
+  2>&1 | tee "$GUIDELLM_LOG"
+
+echo "============================================================"
+echo "GuideLLM benchmark completed"
+echo "Listing output files in RUN_DIR:"
+echo "============================================================"
+find "$RUN_DIR" -maxdepth 2 -type f -print | sort
+
+echo "============================================================"
+echo "Full workflow completed successfully"
+echo "RUN_DIR:       $RUN_DIR"
+echo "vLLM log:      $VLLM_LOG_FILE"
+echo "GuideLLM log:  $GUIDELLM_LOG"
+echo "Date:          $(date)"
+echo "============================================================"
