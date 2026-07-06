@@ -1,0 +1,124 @@
+#PBS -N HPCG-NSYS-p2p4
+#PBS -q gpu_as
+#PBS -P hpc_admin
+#PBS -l select=1:ncpus=96:ngpus=8
+#PBS -l walltime=01:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+# ============================================================
+# GAAS HPCG Nsight Systems profiling run
+#
+# Usage:
+#   qsub -v RUN_NAME=grid_4x1x2_nsys hpcg_nsys_singleNode.pbs
+#
+# Output:
+#   nsys_hpcg_trace/<run_name>/
+#       hpcg_rank_0.qdrep / .sqlite
+#       ...
+#       hpcg_rank_7.qdrep / .sqlite
+#       hpcg_stdout.log
+# ============================================================
+
+cd "${PBS_O_WORKDIR}"
+
+# ------------------------------------------------------------
+# User-configurable run name
+# ------------------------------------------------------------
+RAW_RUN_NAME="${RUN_NAME:-HPCG_GRID_4x1x2}"
+
+# Sanitize run name so it is safe as a directory name.
+RUN_NAME_CLEAN="$(echo "${RAW_RUN_NAME}" | sed 's/[^A-Za-z0-9._-]/_/g')"
+
+# ------------------------------------------------------------
+# Paths
+# ------------------------------------------------------------
+CONTAINER="${PBS_O_WORKDIR}/hpc-benchmarks_26.02.sif"
+
+# Nsight Systems inside the container.
+# Verify this path first using the commands below.
+NSYS="/usr/local/cuda-13.1/NsightSystems-cli-2025.6.1/target-linux-x64/nsys"
+
+NSYS_OUT_ROOT="nsys_hpcg_trace"
+RUN_DIR="${NSYS_OUT_ROOT}/${RUN_NAME_CLEAN}"
+
+if [ -d "${RUN_DIR}" ]; then
+    echo "ERROR: Run directory already exists:"
+    echo "  ${RUN_DIR}"
+    echo
+    echo "Choose a new RUN_NAME, or delete the old directory manually."
+    exit 1
+fi
+
+mkdir -p "${RUN_DIR}"
+
+echo "============================================================"
+echo "GAAS HPCG Nsight Systems profiling run"
+echo "Run name   : ${RUN_NAME_CLEAN}"
+echo "Output dir : ${RUN_DIR}"
+echo "Container  : ${CONTAINER}"
+echo "Nsight     : ${NSYS}"
+echo "Grid shape : 4 x 1 x 2"
+echo "p2p mode   : 0 / MPI_CPU"
+echo "============================================================"
+
+# ------------------------------------------------------------
+# Load modules
+# ------------------------------------------------------------
+module purge
+module load apptainer/1.4.1
+module load nvhpc/26.3
+module load squashfuse/0.5.2
+module load gocryptfs/2.5.0
+
+# ------------------------------------------------------------
+# Quick hardware probe
+# ------------------------------------------------------------
+nvidia-smi topo -m
+numactl --hardware
+
+# ------------------------------------------------------------
+# Run HPCG under Nsight Systems
+# ------------------------------------------------------------
+# env variables
+export OMP_NUM_THREADS=10
+export OMP_PLACES=cores
+export APPTAINERENV_OMP_NUM_THREADS=10
+export APPTAINERENV_OMP_PLACES=cores
+
+apptainer exec --nv "${CONTAINER}" \
+  mpirun -np 8 \
+    -x OMP_NUM_THREADS \
+    -x OMP_PLACES \
+    --bind-to none \
+    "${NSYS}" profile \
+      -o "${RUN_DIR}/hpcg_rank_%q{OMPI_COMM_WORLD_RANK}" \
+      --trace=cuda,nvtx,osrt,mpi \
+      --sample=cpu \
+      --force-overwrite=true \
+      /workspace/hpcg.sh \
+        --npx 1 --npy 8 --npz 1 \
+        --nx 256 --ny 1024 --nz 256 \
+        --rt 60 \
+        --b 1 \
+        --gss 8192 \
+        --l2cmp 0 \
+        --p2p 4 \
+        --gpu-affinity 0:1:2:3:4:5:6:7 \
+        --mem-affinity 0:0:0:0:1:1:1:1 \
+        --cpu-affinity 0-9:10-19:20-29:30-39:56,69-77:78-87:88-97:98-107
+  2>&1 | tee "${RUN_DIR}/hpcg_stdout.log"
+
+echo
+echo "============================================================"
+echo "Run complete."
+echo "Nsight output stored in:"
+echo "  ${RUN_DIR}"
+echo
+echo "Useful next commands:"
+echo "  ls -lh ${RUN_DIR}"
+echo "  nsys stats --report cuda_api_sum,cuda_gpu_kern_sum,mpi_sum,nvtx_sum,osrt_sum ${RUN_DIR}/hpcg_rank_0.sqlite"
+echo "  nsys stats --report cuda_api_sum,cuda_gpu_kern_sum,mpi_sum,nvtx_sum,osrt_sum ${RUN_DIR}/hpcg_rank_1.sqlite"
+echo "  nsys stats --report cuda_api_sum,cuda_gpu_kern_sum,mpi_sum,nvtx_sum,osrt_sum ${RUN_DIR}/hpcg_rank_7.sqlite"
+echo "============================================================"

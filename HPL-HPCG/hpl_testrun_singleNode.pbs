@@ -1,0 +1,65 @@
+#PBS -N HPL-NVSHMEM_SWAP
+#PBS -q gpu_as
+#PBS -P hpc_admin
+#PBS -l select=1:ngpus=8:host=hpc-gaas-g23
+#PBS -l walltime=01:00:00
+#PBS -j oe
+
+# Go to current diretory
+cd $PBS_O_WORKDIR
+
+# Load module
+module purge
+module load apptainer/1.4.1
+module load nvhpc/26.3
+module load squashfuse/0.5.2
+module load gocryptfs/2.5.0
+
+# Probe gpu node hardware
+nvidia-smi
+nvidia-smi topo -m
+numactl -H
+
+# NCCL FLAGS
+export NCCL_DEBUG=INFO
+export APPTAINERENV_NCCL_DEBUG=INFO
+
+# env variables
+export OMP_NUM_THREADS=10
+export OMP_PLACES=cores
+export APPTAINERENV_OMP_NUM_THREADS=10
+export APPTAINERENV_OMP_PLACES=cores
+
+# HPL Flags
+# Flags to ensure reproducibility
+export HPL_CUSOLVER_MP_TESTS=0
+export APPTAINERENV_HPL_CUSOLVER_MP_TESTS=0
+
+# Computation flags
+export HPL_CHUNK_SIZE_NBS=64
+export HPL_CTA_PER_FCT=32
+export HPL_FCT_CHUNK_SIZE=64
+export HPL_DIST_TRSM_FLAG=1
+
+# Communication flags
+export HPL_P2P_AS_BCAST=4
+export APPTAINERENV_HPL_P2P_AS_BCAST=4
+export HPL_NVSHMEM_SWAP=1
+
+# ONLY FOR P2P=2 - we must tell HPL to totally disable NVSHMEM or else it will conflict with CUDA malloc
+# export HPL_USE_NVSHMEM=0
+# export HPL_FCT_COMM_POLICY=1
+# export HPL_NVSHMEM_SWAP=0
+
+# Execute hpl in container using apptainer
+apptainer exec --nv hpc-benchmarks_26.02.sif \
+  mpirun -np 8 \
+    -x NCCL_DEBUG \
+    -x APPTAINERENV_NCCL_DEBUG \
+    --bind-to none \
+    /workspace/hpl.sh \
+      --dat HPL-H200-8GPU.dat \
+      --no-multinode \
+      --gpu-affinity 0:1:2:3:4:5:6:7 \
+      --mem-affinity 0:0:0:0:1:1:1:1 \
+      --cpu-affinity 0-9:10-19:20-29:30-39:56,69-77:78-87:88-97:98-107

@@ -1,0 +1,53 @@
+#PBS -N HPCG-SH-TEST
+#PBS -q gpu_as
+#PBS -P hpc_admin
+#PBS -l select=1:ngpus=8
+#PBS -l walltime=00:45:00
+#PBS -j oe
+
+# Go to current diretory
+cd $PBS_O_WORKDIR
+
+# Load module
+module purge
+module load apptainer/1.4.1
+module load nvhpc/26.3
+module load squashfuse/0.5.2
+module load gocryptfs/2.5.0
+
+# Probe gpu node hardware
+nvidia-smi topo -m
+
+# Record starting temp
+echo "GPU STARTING TEMP"
+nvidia-smi --query-gpu=index,pci.bus_id,temperature.gpu,power.draw,power.limit,clocks.sm,clocks.mem,pstate --format=csv
+
+# env variables
+export OMP_NUM_THREADS=10
+export OMP_PLACES=cores
+export APPTAINERENV_OMP_NUM_THREADS=10
+export APPTAINERENV_OMP_PLACES=cores
+
+SCRIPT="/home/pham0094/hpl_hpcg_container/hpcg_custom.sh"
+
+# Execute hpl in container using apptainer
+apptainer exec --nv hpc-benchmarks_26.02.sif \
+  mpirun -np 8 \
+    -x OMP_NUM_THREADS \
+    -x OMP_PLACES \
+    --bind-to none \
+    /workspace/hpcg.sh \
+      --npx 1 --npy 8 --npz 1 \
+      --nx 256 --ny 1024 --nz 256 \
+      --rt 60 \
+      --b 1 \
+      --gss 8192 \
+      --p2p 2 \
+      --l2cmp 1 \
+      --gpu-affinity 0:1:2:3:4:5:6:7 \
+      --mem-affinity 0:0:0:0:1:1:1:1 \
+      --cpu-affinity 0-9:10-19:20-29:30-39:56,69-77:78-87:88-97:98-107
+
+# Record ending temp
+echo "GPU ENDING TEMP"
+nvidia-smi --query-gpu=index,pci.bus_id,temperature.gpu,power.draw,power.limit,clocks.sm,clocks.mem,pstate --format=csv

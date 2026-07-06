@@ -1,0 +1,221 @@
+#PBS -N HPL-NSYS
+#PBS -q gpu_as
+#PBS -P hpc_admin
+#PBS -l select=1:ncpus=96:ngpus=8
+#PBS -l walltime=01:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+# ============================================================
+# GAAS HPL Nsight Systems profiling run
+#
+# Usage:
+#   qsub -v RUN_NAME=hpl_p2p4_nbs64_cta32 hpl_testrun_nsight.pbs
+#
+# Output:
+#   nsys_hpl_trace/<run_name>/
+#       hpl_rank_0.qdrep / .sqlite
+#       ...
+#       hpl_rank_7.qdrep / .sqlite
+#       hpl_stdout.log
+# ============================================================
+
+cd "${PBS_O_WORKDIR}"
+
+# ------------------------------------------------------------
+# User-configurable run name
+# ------------------------------------------------------------
+RAW_RUN_NAME="${RUN_NAME:-HPL_DEFAULT_NSIGHT}"
+
+# Sanitize run name so it is safe as a directory name.
+RUN_NAME_CLEAN="$(echo "${RAW_RUN_NAME}" | sed 's/[^A-Za-z0-9._-]/_/g')"
+
+# ------------------------------------------------------------
+# Paths
+# ------------------------------------------------------------
+CONTAINER="${PBS_O_WORKDIR}/hpc-benchmarks_26.02.sif"
+
+# Nsight Systems inside the container.
+NSYS="/usr/local/cuda-13.1/NsightSystems-cli-2025.6.1/target-linux-x64/nsys"
+
+NSYS_OUT_ROOT="nsys_hpl_trace"
+RUN_DIR="${NSYS_OUT_ROOT}/${RUN_NAME_CLEAN}"
+
+if [ -d "${RUN_DIR}" ]; then
+    echo "ERROR: Run directory already exists:"
+    echo "  ${RUN_DIR}"
+    echo
+    echo "Choose a new RUN_NAME, or delete the old directory manually."
+    exit 1
+fi
+
+mkdir -p "${RUN_DIR}"
+
+echo "============================================================"
+echo "GAAS HPL Nsight Systems profiling run"
+echo "Run name   : ${RUN_NAME_CLEAN}"
+echo "Output dir : ${RUN_DIR}"
+echo "Container  : ${CONTAINER}"
+echo "Nsight     : ${NSYS}"
+echo "============================================================"
+
+# ------------------------------------------------------------
+# Load modules
+# ------------------------------------------------------------
+module purge
+module load apptainer/1.4.1
+module load nvhpc/26.3
+module load squashfuse/0.5.2
+module load gocryptfs/2.5.0
+
+# ------------------------------------------------------------
+# Quick hardware probe
+# ------------------------------------------------------------
+nvidia-smi
+nvidia-smi topo -m
+numactl -H
+
+# ============================================================
+# HPL tuning configuration
+# Change flags manually here between runs.
+# ============================================================
+
+# ------------------------------------------------------------
+# OpenMP / CPU binding configuration
+# ------------------------------------------------------------
+export OMP_NUM_THREADS=10
+export OMP_PLACES=cores
+
+export APPTAINERENV_OMP_NUM_THREADS="${OMP_NUM_THREADS}"
+export APPTAINERENV_OMP_PLACES="${OMP_PLACES}"
+
+# ------------------------------------------------------------
+# HPL problem / run geometry
+# ------------------------------------------------------------
+HPL_DAT="HPL-H200-8GPU.dat"
+
+GPU_AFFINITY="0:1:2:3:4:5:6:7"
+MEM_AFFINITY="0:0:0:0:1:1:1:1"
+CPU_AFFINITY="0-9:10-19:20-29:30-39:56,69-77:78-87:88-97:98-107"
+
+# ------------------------------------------------------------
+# Reproducibility flags
+# ------------------------------------------------------------
+export HPL_CUSOLVER_MP_TESTS=0
+
+export APPTAINERENV_HPL_CUSOLVER_MP_TESTS="${HPL_CUSOLVER_MP_TESTS}"
+
+# ------------------------------------------------------------
+# Compute-side tuning flags
+# Main knobs to sweep:
+#   HPL_CHUNK_SIZE_NBS
+#   HPL_CTA_PER_FCT
+#   HPL_FCT_CHUNK_SIZE
+#   HPL_DIST_TRSM_FLAG
+# ------------------------------------------------------------
+export HPL_CHUNK_SIZE_NBS=64
+export HPL_CTA_PER_FCT=32
+export HPL_FCT_CHUNK_SIZE=64
+export HPL_DIST_TRSM_FLAG=1
+
+export APPTAINERENV_HPL_CHUNK_SIZE_NBS="${HPL_CHUNK_SIZE_NBS}"
+export APPTAINERENV_HPL_CTA_PER_FCT="${HPL_CTA_PER_FCT}"
+export APPTAINERENV_HPL_FCT_CHUNK_SIZE="${HPL_FCT_CHUNK_SIZE}"
+export APPTAINERENV_HPL_DIST_TRSM_FLAG="${HPL_DIST_TRSM_FLAG}"
+
+# ------------------------------------------------------------
+# Communication / P2P / NVSHMEM tuning flags
+# Main knobs to sweep:
+#   HPL_P2P_AS_BCAST
+#   HPL_NVSHMEM_SWAP
+#   HPL_USE_NVSHMEM
+#   HPL_FCT_COMM_POLICY
+#
+# Notes:
+# - For normal P2P=0/1/3/4 testing, keep NVSHMEM settings as needed.
+# - For P2P=2, if CUDA malloc / NVSHMEM conflict appears, try disabling
+#   NVSHMEM using the commented block below.
+# ------------------------------------------------------------
+export HPL_P2P_AS_BCAST=4
+export HPL_NVSHMEM_SWAP=1
+
+export APPTAINERENV_HPL_P2P_AS_BCAST="${HPL_P2P_AS_BCAST}"
+export APPTAINERENV_HPL_NVSHMEM_SWAP="${HPL_NVSHMEM_SWAP}"
+
+# Optional: only enable this block when testing a configuration that needs it.
+# export HPL_USE_NVSHMEM=0
+# export HPL_FCT_COMM_POLICY=1
+# export HPL_NVSHMEM_SWAP=0
+#
+# export APPTAINERENV_HPL_USE_NVSHMEM="${HPL_USE_NVSHMEM}"
+# export APPTAINERENV_HPL_FCT_COMM_POLICY="${HPL_FCT_COMM_POLICY}"
+# export APPTAINERENV_HPL_NVSHMEM_SWAP="${HPL_NVSHMEM_SWAP}"
+
+# ------------------------------------------------------------
+# Print resolved tuning configuration
+# ------------------------------------------------------------
+echo "============================================================"
+echo "Resolved HPL tuning configuration"
+echo "HPL_DAT                 : ${HPL_DAT}"
+echo "OMP_NUM_THREADS         : ${OMP_NUM_THREADS}"
+echo "OMP_PLACES              : ${OMP_PLACES}"
+echo "GPU_AFFINITY            : ${GPU_AFFINITY}"
+echo "MEM_AFFINITY            : ${MEM_AFFINITY}"
+echo "CPU_AFFINITY            : ${CPU_AFFINITY}"
+echo
+echo "HPL_CUSOLVER_MP_TESTS   : ${HPL_CUSOLVER_MP_TESTS}"
+echo
+echo "HPL_CHUNK_SIZE_NBS      : ${HPL_CHUNK_SIZE_NBS}"
+echo "HPL_CTA_PER_FCT         : ${HPL_CTA_PER_FCT}"
+echo "HPL_FCT_CHUNK_SIZE      : ${HPL_FCT_CHUNK_SIZE}"
+echo "HPL_DIST_TRSM_FLAG      : ${HPL_DIST_TRSM_FLAG}"
+echo
+echo "HPL_P2P_AS_BCAST        : ${HPL_P2P_AS_BCAST}"
+echo "HPL_NVSHMEM_SWAP        : ${HPL_NVSHMEM_SWAP}"
+echo "HPL_USE_NVSHMEM         : ${HPL_USE_NVSHMEM:-unset}"
+echo "HPL_FCT_COMM_POLICY     : ${HPL_FCT_COMM_POLICY:-unset}"
+echo "============================================================"
+
+# ============================================================
+# Run HPL under Nsight Systems
+# ============================================================
+apptainer exec --nv "${CONTAINER}" \
+  mpirun -np 8 \
+    -x OMP_NUM_THREADS \
+    -x OMP_PLACES \
+    -x HPL_CUSOLVER_MP_TESTS \
+    -x HPL_CHUNK_SIZE_NBS \
+    -x HPL_CTA_PER_FCT \
+    -x HPL_FCT_CHUNK_SIZE \
+    -x HPL_DIST_TRSM_FLAG \
+    -x HPL_P2P_AS_BCAST \
+    -x HPL_NVSHMEM_SWAP \
+    -x HPL_USE_NVSHMEM \
+    -x HPL_FCT_COMM_POLICY \
+    --bind-to none \
+    "${NSYS}" profile \
+      -o "${RUN_DIR}/hpl_rank_%q{OMPI_COMM_WORLD_RANK}" \
+      --trace=cuda,nvtx,osrt,mpi \
+      --sample=cpu \
+      --force-overwrite=true \
+      /workspace/hpl.sh \
+        --dat "${HPL_DAT}" \
+        --no-multinode \
+        --gpu-affinity "${GPU_AFFINITY}" \
+        --mem-affinity "${MEM_AFFINITY}" \
+        --cpu-affinity "${CPU_AFFINITY}" \
+  2>&1 | tee "${RUN_DIR}/hpl_stdout.log"
+
+echo
+echo "============================================================"
+echo "Run complete."
+echo "Nsight output stored in:"
+echo "  ${RUN_DIR}"
+echo
+echo "Useful next commands:"
+echo "  ls -lh ${RUN_DIR}"
+echo "  nsys stats --report cuda_api_sum,cuda_gpu_kern_sum,mpi_sum,nvtx_sum,osrt_sum ${RUN_DIR}/hpl_rank_0.sqlite"
+echo "  nsys stats --report cuda_api_sum,cuda_gpu_kern_sum,mpi_sum,nvtx_sum,osrt_sum ${RUN_DIR}/hpl_rank_1.sqlite"
+echo "  nsys stats --report cuda_api_sum,cuda_gpu_kern_sum,mpi_sum,nvtx_sum,osrt_sum ${RUN_DIR}/hpl_rank_7.sqlite"
+echo "============================================================"
