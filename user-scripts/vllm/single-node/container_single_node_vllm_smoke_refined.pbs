@@ -1,5 +1,5 @@
 #!/bin/bash
-#PBS -N qwen_vllm_container_smoke
+#PBS -N <job_name>
 #PBS -j oe
 #PBS -l walltime=01:00:00
 #PBS -P <project>

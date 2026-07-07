@@ -1,5 +1,5 @@
 #!/bin/bash
-#PBS -N benchmark_2x2
+#PBS -N <job_name>
 #PBS -P <project>
 #PBS -q <queue>
 #PBS -l walltime=01:00:00

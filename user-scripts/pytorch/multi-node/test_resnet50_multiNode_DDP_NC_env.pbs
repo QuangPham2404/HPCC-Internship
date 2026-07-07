@@ -1,5 +1,5 @@
 #!/bin/bash
-#PBS -N 4x8_NOCON_DDP_ENVSTYLE_NO_ETH
+#PBS -N <job_name>
 #PBS -P <project>
 #PBS -q <queue>
 #PBS -l place=scatter
