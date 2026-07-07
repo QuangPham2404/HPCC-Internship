@@ -2,6 +2,21 @@
 
 This is a model setup script that you can use as a starting point and change according to your cluster, container, GPU layout, and benchmark needs. The workflow launches a synthetic ResNet-50 Distributed Data Parallel test across multiple PBS GPU nodes using Apptainer and OpenMPI.
 
+## One-time container download
+
+Download the NVIDIA PyTorch container from NGC before submitting the PBS script:
+
+<https://catalog.ngc.nvidia.com/orgs/nvidia/-/containers/pytorch/->
+
+Use the pinned `26.04` container version. Do not install the `latest` tag, because it may include package conflicts and can be unstable.
+
+```bash
+module load apptainer/1.4.1
+apptainer pull pytorch_26.04.sif docker://nvcr.io/nvidia/pytorch:26.04
+```
+
+After the pull completes, use the absolute path to `pytorch_26.04.sif` as the `CONTAINER` value in the containerized PBS script.
+
 ## Files
 
 - `test_resnet50_multiNode_DDP_env.pbs` - PBS launch script for the containerized multi-node workflow.

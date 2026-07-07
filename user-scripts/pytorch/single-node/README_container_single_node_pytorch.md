@@ -2,6 +2,21 @@
 
 This workflow runs a synthetic ResNet-50 Distributed Data Parallel benchmark on one PBS GPU node using an Apptainer container. It is intended as a plug-and-play smoke test for checking that the container, CUDA, PyTorch, and `torchrun` can see and use the allocated GPUs.
 
+## One-time container download
+
+Download the NVIDIA PyTorch container from NGC before submitting the PBS script:
+
+<https://catalog.ngc.nvidia.com/orgs/nvidia/-/containers/pytorch/->
+
+Use the pinned `26.04` container version. Do not install the `latest` tag, because it may include package conflicts and can be unstable.
+
+```bash
+module load apptainer/1.4.1
+apptainer pull pytorch_26.04.sif docker://nvcr.io/nvidia/pytorch:26.04
+```
+
+After the pull completes, use the absolute path to `pytorch_26.04.sif` as the `container_path` value in the containerized PBS script.
+
 ## Files
 
 - `test_resnet50_singleNode_DDP.pbs` - PBS launch script for the containerized workflow.
