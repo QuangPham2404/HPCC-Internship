@@ -12,11 +12,13 @@ set -euo pipefail
 
 if [[ "${EUID}" -eq 0 ]]; then
   echo "ERROR: Do not run this script as root."
-  echo "Run it as your normal user: pham0094"
+  echo "Run it as your normal non-root user."
   exit 1
 fi
 
-cd ~/guidellm_vLLMBench
+BENCH_ROOT="${BENCH_ROOT:-$HOME/guidellm_vLLMBench}"
+
+cd "$BENCH_ROOT"
 
 echo "User: $(whoami)"
 echo "Working directory: $(pwd)"
@@ -38,7 +40,7 @@ rm -rf guidellm_env
 echo "Creating fresh guidellm_env..."
 "$PY312" -m venv guidellm_env
 
-source ~/guidellm_vLLMBench/guidellm_env/bin/activate
+source "$BENCH_ROOT/guidellm_env/bin/activate"
 
 unset PYTHONPATH
 unset PYTHONHOME
@@ -63,5 +65,5 @@ guidellm --version || true
 
 echo "============================================================"
 echo "GuideLLM environment reset and installation complete."
-echo "Env path: ~/guidellm_vLLMBench/guidellm_env"
+echo "Env path: $BENCH_ROOT/guidellm_env"
 echo "============================================================"

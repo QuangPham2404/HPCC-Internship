@@ -8,7 +8,7 @@ set -euo pipefail
 # This script does NOT delete, recreate, or reinstall the env.
 #
 # Usage:
-#   source ~/guidellm_vLLMBench/start_guidellm_env.sh
+#   source "$HOME/guidellm_vLLMBench/start_guidellm_env.sh"
 # ============================================================
 
 if [[ "${EUID}" -eq 0 ]]; then
@@ -17,7 +17,9 @@ if [[ "${EUID}" -eq 0 ]]; then
   return 1 2>/dev/null || exit 1
 fi
 
-cd ~/guidellm_vLLMBench
+BENCH_ROOT="${BENCH_ROOT:-$HOME/guidellm_vLLMBench}"
+
+cd "$BENCH_ROOT"
 
 module purge
 module load pytorch/2.11.0
@@ -25,14 +27,14 @@ module load pytorch/2.11.0
 unset PYTHONPATH
 unset PYTHONHOME
 
-if [[ ! -f ~/guidellm_vLLMBench/guidellm_env/bin/activate ]]; then
+if [[ ! -f "$BENCH_ROOT/guidellm_env/bin/activate" ]]; then
   echo "ERROR: guidellm_env does not exist."
   echo "Create it first with:"
-  echo "  ~/guidellm_vLLMBench/reset_guidellm_env.sh"
+  echo "  $BENCH_ROOT/reset_guidellm_env.sh"
   return 1 2>/dev/null || exit 1
 fi
 
-source ~/guidellm_vLLMBench/guidellm_env/bin/activate
+source "$BENCH_ROOT/guidellm_env/bin/activate"
 
 unset PYTHONPATH
 unset PYTHONHOME

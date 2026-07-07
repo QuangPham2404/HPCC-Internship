@@ -1,6 +1,6 @@
 #PBS -N HPL-NVSHMEM_SWAP
-#PBS -q gpu_as
-#PBS -P hpc_admin
+#PBS -q <queue>
+#PBS -P <project>
 #PBS -l select=1:ngpus=8:host=hpc-gaas-g23
 #PBS -l walltime=01:00:00
 #PBS -j oe

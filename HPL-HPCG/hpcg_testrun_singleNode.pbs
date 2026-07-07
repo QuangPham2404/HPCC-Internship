@@ -1,6 +1,6 @@
 #PBS -N HPCG-SH-TEST
-#PBS -q gpu_as
-#PBS -P hpc_admin
+#PBS -q <queue>
+#PBS -P <project>
 #PBS -l select=1:ngpus=8
 #PBS -l walltime=00:45:00
 #PBS -j oe
@@ -28,7 +28,7 @@ export OMP_PLACES=cores
 export APPTAINERENV_OMP_NUM_THREADS=10
 export APPTAINERENV_OMP_PLACES=cores
 
-SCRIPT="/home/pham0094/hpl_hpcg_container/hpcg_custom.sh"
+SCRIPT="<path/to/hpcg_custom.sh>"
 
 # Execute hpl in container using apptainer
 apptainer exec --nv hpc-benchmarks_26.02.sif \

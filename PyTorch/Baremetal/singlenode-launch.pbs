@@ -1,6 +1,6 @@
 #PBS -N 1x1GPU_noCon_DDP
-#PBS -q gpu_as
-#PBS -P hpc_admin
+#PBS -q <queue>
+#PBS -P <project>
 
 # -----------------------------------------------------------
 # IMPORTANT:

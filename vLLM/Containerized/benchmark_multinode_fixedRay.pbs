@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -N benchmark_2x2
-#PBS -P hpc_admin
-#PBS -q gpu_as
+#PBS -P <project>
+#PBS -q <queue>
 #PBS -l walltime=01:00:00
 #PBS -j oe
 #PBS -l place=scatter
@@ -68,13 +68,13 @@ export LD_LIBRARY_PATH="${NVROOT}/comm_libs/hpcx/lib:${LD_LIBRARY_PATH:-}"
 # ------------------------------------------------------------
 # Container image
 # ------------------------------------------------------------
-export SIF="$HOME/guidellm_vLLMBench/vLLM_container/vllm_26.04-py3.sif"
+export SIF="<path/to/vllm_container.sif>"
 
 # ------------------------------------------------------------
 # Project working directory on shared storage
 # This must be visible from all allocated nodes.
 # ------------------------------------------------------------
-export BENCH_ROOT="/projects_vol/gp_hpcadmin/pham0094/guidellm_vLLMBench"
+export BENCH_ROOT="<path/to/shared/bench_root>"
 
 # Ray was installed with pip --user inside this container home.
 # Use the explicit binary because cleanenv may not include ~/.local/bin in PATH.

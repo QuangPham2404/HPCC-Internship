@@ -1,6 +1,6 @@
 #PBS -N HPCG-NSYS-p2p4
-#PBS -q gpu_as
-#PBS -P hpc_admin
+#PBS -q <queue>
+#PBS -P <project>
 #PBS -l select=1:ncpus=96:ngpus=8
 #PBS -l walltime=01:00:00
 #PBS -j oe

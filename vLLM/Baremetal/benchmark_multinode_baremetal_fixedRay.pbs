@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -N baremetal_R3_2x1
-#PBS -P hpc_admin
-#PBS -q gpu_as
+#PBS -P <project>
+#PBS -q <queue>
 #PBS -l walltime=01:00:00
 #PBS -j oe
 #PBS -l place=scatter
@@ -76,7 +76,7 @@ export LD_LIBRARY_PATH="${NVROOT}/comm_libs/hpcx/lib:${LD_LIBRARY_PATH:-}"
 # ------------------------------------------------------------
 # Project working directory on shared storage
 # ------------------------------------------------------------
-export BENCH_ROOT="/projects_vol/gp_hpcadmin/pham0094/guidellm_vLLMBench"
+export BENCH_ROOT="<path/to/shared/bench_root>"
 
 # ------------------------------------------------------------
 # CUDA_VISIBLE_DEVICES fix for bare-metal vLLM
@@ -104,7 +104,7 @@ fi
 # Important:
 # - vllm/0.19.0 provides the bare-metal vLLM executable and module Python.
 # - Ray is installed in a clean venv built with Python 3.12.13:
-#     /home/pham0094/guidellm_vLLMBench/baremetal_ray
+#     <path/to/baremetal_ray_env>
 #
 # We use:
 #   PYTHON_BIN      = module Python used by vLLM
@@ -115,7 +115,7 @@ fi
 # ------------------------------------------------------------
 unset PYTHONNOUSERSITE || true
 
-export BAREMETAL_RAY_ENV="/home/pham0094/guidellm_vLLMBench/baremetal_ray"
+export BAREMETAL_RAY_ENV="<path/to/baremetal_ray_env>"
 export RAY_PYTHON_BIN="$BAREMETAL_RAY_ENV/bin/python"
 export RAY_SITE_PACKAGES="$BAREMETAL_RAY_ENV/lib/python3.12/site-packages"
 

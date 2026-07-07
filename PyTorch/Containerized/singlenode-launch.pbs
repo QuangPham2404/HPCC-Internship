@@ -1,6 +1,6 @@
 #PBS -N 1x1GPU_DDP
-#PBS -q gpu_as
-#PBS -P hpc_admin
+#PBS -q <queue>
+#PBS -P <project>
 
 # ------------------------------------------------------------
 # IMPORTANT:
@@ -37,7 +37,7 @@ module load gocryptfs/2.5.0
 # ------------------------------------------------------------
 # Paths
 # ------------------------------------------------------------
-container_path="/home/pham0094/pyTorch_container/pytorch_26.04-py3.sif"
+container_path="<path/to/pytorch_container.sif>"
 
 # IMPORTANT:
 # Use the NEW DDP Python script
