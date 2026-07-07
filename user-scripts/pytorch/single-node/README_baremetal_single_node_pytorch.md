@@ -1,5 +1,7 @@
 # Bare-Metal Single-Node PyTorch DDP Smoke Test
 
+This is a model script template. Replace the placeholder project, queue, path, storage, and runtime values with valid cluster-specific values before submitting it.
+
 This workflow runs the same synthetic ResNet-50 Distributed Data Parallel benchmark directly from cluster modules, without an Apptainer container. Use it to verify that the bare-metal Python/PyTorch module stack can launch `torchrun` and use the allocated GPUs.
 
 ## Files

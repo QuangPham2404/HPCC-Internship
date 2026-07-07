@@ -20,7 +20,7 @@
 # select=2:ncpus=96:ngpus=8:mpiprocs=8
 # ------------------------------------------------------------
 
-#PBS -l select=4:ngpus=8:mpiprocs=8
+#PBS -l select=2:ncpus=96:ngpus=8:mpiprocs=8
 
 #PBS -l walltime=02:00:00
 #PBS -j oe
@@ -31,8 +31,8 @@ module load apptainer/1.4.1
 module load squashfuse/0.5.2
 module load nvhpc/26.3
 
-CONTAINER=<path>
-SCRIPT=<path>
+CONTAINER="/path/to/pytorch_26.04.sif"
+SCRIPT="/path/to/resnet50_multiNode_DDP_env.py"
 
 # ------------------------------------------------------------
 # Automatically derived from PBS allocation

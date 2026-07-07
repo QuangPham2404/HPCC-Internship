@@ -11,7 +11,7 @@
 # ngpus=4  --> request 4 GPUs
 # ngpus=8  --> request 8 GPUs
 # ------------------------------------------------------------
-#PBS -l select=1:ngpus=1
+#PBS -l select=1:ngpus=2
 
 #PBS -l walltime=08:00:00
 
@@ -38,9 +38,9 @@ module load gocryptfs/2.5.0
 # ------------------------------------------------------------
 # Paths
 # ------------------------------------------------------------
-container_path=<path>
+container_path="/path/to/pytorch_26.04.sif"
 
-python_script=<path>
+python_script="/path/to/resnet50_singleNode_DDP.py"
 
 # ------------------------------------------------------------
 # Container PyTorch Info
@@ -79,4 +79,4 @@ export MASTER_PORT
 apptainer exec --nv \
 --env MASTER_PORT="$MASTER_PORT" \
 "$container_path" \
-torchrun --nproc_per_node=1 --master_port="$MASTER_PORT" "$python_script"
+torchrun --nproc_per_node=2 --master_port="$MASTER_PORT" "$python_script"

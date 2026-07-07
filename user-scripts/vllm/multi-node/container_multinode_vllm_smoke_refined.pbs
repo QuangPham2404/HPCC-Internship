@@ -41,9 +41,9 @@
 # The structure of Ray is that it will have 1 Ray head on a node and 1 Ray worker on the remaining nodes
 #
 # ---- 2 nodes x 1 GPU each = 2 total GPUs ----
-#PBS -l select=2:ncpus=12:ngpus=2:mpiprocs=1
-export GPUS_PER_NODE=2
-export TP_SIZE=2
+#PBS -l select=2:ncpus=12:ngpus=1:mpiprocs=1
+export GPUS_PER_NODE=1
+export TP_SIZE=1
 export PP_SIZE=2
 #
 # ---- 2 nodes x 2 GPUs each = 4 total GPUs ----
@@ -97,19 +97,19 @@ export LD_LIBRARY_PATH="${NVROOT}/comm_libs/hpcx/lib:${LD_LIBRARY_PATH:-}"
 # ------------------------------------------------------------
 # Container image
 # ------------------------------------------------------------
-export SIF=<path>
+export SIF="/path/to/vllm_26.04.sif"
 
 # ------------------------------------------------------------
 # Project working directory on shared storage
 # This must be visible from all allocated nodes.
 # ------------------------------------------------------------
-export BENCH_ROOT=<path>
+export BENCH_ROOT="/path/to/shared/bench_root"
 
 # Ray was installed with pip --user inside this container home.
 # Use the explicit binary because cleanenv may not include ~/.local/bin in PATH.
 # export RAY_BIN="$BENCH_ROOT/.local/bin/ray"
-export ENV_ROOT=<path>
-export RAY_BIN=<path>
+export ENV_ROOT="/path/to/persistent/container_env"
+export RAY_BIN="/path/to/persistent/container_env/.local/bin/ray"
 
 # ------------------------------------------------------------
 # Hugging Face cache

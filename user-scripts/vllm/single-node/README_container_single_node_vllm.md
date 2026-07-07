@@ -1,5 +1,7 @@
 # Containerized Single-Node vLLM Smoke Test
 
+This is a model script template. Replace the placeholder project, queue, path, storage, and runtime values with valid cluster-specific values before submitting it.
+
 This workflow starts a vLLM OpenAI-compatible server inside an Apptainer container on one PBS GPU node, waits until the server is ready, and sends one optional smoke-test prompt.
 
 Use this script when you want a minimal, reproducible check that:

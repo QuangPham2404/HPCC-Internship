@@ -1,5 +1,7 @@
 # Containerized Single-Node PyTorch DDP Smoke Test
 
+This is a model script template. Replace the placeholder project, queue, path, storage, and runtime values with valid cluster-specific values before submitting it.
+
 This workflow runs a synthetic ResNet-50 Distributed Data Parallel benchmark on one PBS GPU node using an Apptainer container. It is intended as a plug-and-play smoke test for checking that the container, CUDA, PyTorch, and `torchrun` can see and use the allocated GPUs.
 
 ## One-time container download
@@ -31,8 +33,8 @@ Before submitting, update these values in `test_resnet50_singleNode_DDP.pbs`:
 | `#PBS -P <project>` | Your PBS project or account. |
 | `#PBS -q <queue>` | The GPU queue/partition to submit to. |
 | `#PBS -l select=1:ngpus=<N>` | Number of GPUs requested on one node. |
-| `container_path=<path>` | Absolute path to the Apptainer PyTorch `.sif` image. |
-| `python_script=<path>` | Path to `resnet50_singleNode_DDP.py` or another DDP script inside the job working directory. |
+| `container_path="/path/to/pytorch_26.04.sif"` | Absolute path to the Apptainer PyTorch `.sif` image. |
+| `python_script="/path/to/resnet50_singleNode_DDP.py"` | Path to `resnet50_singleNode_DDP.py` or another DDP script inside the job working directory. |
 | `--nproc_per_node=<N>` | Number of DDP worker processes. This should match the requested GPU count. |
 | `walltime` | Maximum runtime for the PBS job. |
 

@@ -31,7 +31,7 @@
 # module purge
 # module load vllm/0.19.0
 #
-# export ENV_ROOT=<path>
+# export ENV_ROOT="/path/to/persistent/ray_env_root"
 #
 # cd "$ENV_ROOT"
 # python3 -m venv --system-site-packages baremetal_ray
@@ -75,9 +75,9 @@
 # - Ray/vLLM then manages the GPUs inside each node.
 #
 # ---- 2 nodes x 1 GPU each = 2 total GPUs ----
-#PBS -l select=2:ncpus=12:ngpus=2:mpiprocs=1
-export GPUS_PER_NODE=2
-export TP_SIZE=2
+#PBS -l select=2:ncpus=12:ngpus=1:mpiprocs=1
+export GPUS_PER_NODE=1
+export TP_SIZE=1
 export PP_SIZE=2
 #
 # ---- 2 nodes x 2 GPUs each = 4 total GPUs ----
@@ -151,7 +151,7 @@ export LD_LIBRARY_PATH="${NVROOT}/comm_libs/hpcx/lib:${LD_LIBRARY_PATH:-}"
 # This does NOT require reinstalling Ray as long as BAREMETAL_RAY_ENV below
 # still points to a compatible Ray venv.
 # ------------------------------------------------------------
-export BENCH_ROOT=<path>
+export BENCH_ROOT="/path/to/shared/bench_root"
 
 # ------------------------------------------------------------
 # Required: normalize CUDA_VISIBLE_DEVICES for bare-metal vLLM
@@ -203,7 +203,7 @@ fi
 # ------------------------------------------------------------
 unset PYTHONNOUSERSITE || true
 
-export BAREMETAL_RAY_ENV=<path>
+export BAREMETAL_RAY_ENV="/path/to/persistent/baremetal_ray"
 export RAY_PYTHON_BIN="$BAREMETAL_RAY_ENV/bin/python"
 export RAY_SITE_PACKAGES="$BAREMETAL_RAY_ENV/lib/python3.12/site-packages"
 

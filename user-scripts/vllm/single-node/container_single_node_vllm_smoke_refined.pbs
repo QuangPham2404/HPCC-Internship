@@ -86,7 +86,7 @@ module load squashfuse/0.5.2
 #
 # Update this to the absolute path of the vLLM container image.
 # ------------------------------------------------------------
-export SIF=<path>
+export SIF="/path/to/vllm_26.04.sif"
 
 
 # ------------------------------------------------------------
@@ -100,7 +100,7 @@ export SIF=<path>
 #   Use a path on large project/scratch storage, not a small home quota.
 #   Keep the path reasonably short to avoid long Unix socket/path issues.
 # ------------------------------------------------------------
-export BENCH_ROOT=<path>
+export BENCH_ROOT="/path/to/shared/bench_root"
 
 # ------------------------------------------------------------
 # Required: Hugging Face cache root

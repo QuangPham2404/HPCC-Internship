@@ -1,5 +1,7 @@
 # Bare-Metal Multi-Node PyTorch DDP Smoke Test
 
+This is a model script template. Replace the placeholder project, queue, path, storage, and runtime values with valid cluster-specific values before submitting it.
+
 This is a model setup script that you can use as a starting point and change according to your cluster modules, GPU layout, network settings, and benchmark needs. The workflow launches a synthetic ResNet-50 Distributed Data Parallel test across multiple PBS GPU nodes without a container.
 
 ## Files
@@ -20,7 +22,7 @@ Before submitting, update these values in `test_resnet50_multiNode_DDP_NC_env.pb
 | `module load python/...` | Python module available on your cluster. |
 | `module load pytorch/...` | PyTorch module available on your cluster. |
 | `module load nvhpc/...` | NVHPC/HPC-X OpenMPI stack used by `mpirun`. |
-| `SCRIPT=<path>` | Path to `resnet50_multiNode_DDP_NC_env.py` or another DDP script. |
+| `SCRIPT="/path/to/resnet50_multiNode_DDP_NC_env.py"` | Path to `resnet50_multiNode_DDP_NC_env.py` or another DDP script. |
 | `NCCL_IB_HCA` | Cluster-specific InfiniBand HCA list, if needed. |
 | `NCCL_DEBUG` / `NCCL_DEBUG_SUBSYS` | Keep enabled for debugging or reduce for cleaner logs. |
 

@@ -163,7 +163,7 @@ echo "Final CUDA_VISIBLE_DEVICES:    $CUDA_VISIBLE_DEVICES"
 # ------------------------------------------------------------
 # Project working directory on large storage
 # ------------------------------------------------------------
-export BENCH_ROOT=<path>
+export BENCH_ROOT="/path/to/shared/bench_root"
 
 # ------------------------------------------------------------
 # Hugging Face cache

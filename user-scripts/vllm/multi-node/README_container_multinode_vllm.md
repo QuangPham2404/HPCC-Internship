@@ -1,5 +1,7 @@
 # Containerized Multi-Node vLLM with Ray
 
+This is a model script template. Replace the placeholder project, queue, path, storage, and runtime values with valid cluster-specific values before submitting it.
+
 This README explains how to use `container_multinode_vllm_smoke_refined.pbs` to launch a vLLM OpenAI-compatible server across multiple PBS nodes using an Apptainer container and Ray.
 
 The script is designed for a workflow where Ray is installed once into a persistent container home directory and then reused across different vLLM models and benchmark runs.

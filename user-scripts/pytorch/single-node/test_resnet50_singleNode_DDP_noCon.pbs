@@ -11,7 +11,7 @@
 # ngpus=4
 # ngpus=8
 # ------------------------------------------------------------
-#PBS -l select=1:ngpus=1
+#PBS -l select=1:ngpus=2
 
 #PBS -l walltime=08:00:00
 
@@ -70,4 +70,4 @@ echo "===== Running Multi-GPU DDP Benchmark ====="
 # Calculate a random port for PyTorhc. This is to ensure there is no port clashing on a shared compute node
 MASTER_PORT=$((20000 + ${PBS_JOBID%%.*} % 40000))
 
-torchrun --nproc_per_node=1 --master_port=$MASTER_PORT resnet50_singleNode_DDP_noCon.py
+torchrun --nproc_per_node=2 --master_port=$MASTER_PORT resnet50_singleNode_DDP_noCon.py

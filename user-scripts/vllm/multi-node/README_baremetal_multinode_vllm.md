@@ -1,5 +1,7 @@
 # Bare-Metal Multi-Node vLLM Workflow
 
+This is a model script template. Replace the placeholder project, queue, path, storage, and runtime values with valid cluster-specific values before submitting it.
+
 This workflow starts a multi-node, non-containerized vLLM server under PBS and performs a single OpenAI-compatible API smoke test.
 
 It assumes:
@@ -24,7 +26,7 @@ The reference setup commands are included at the top of the script. The expected
 module purge
 module load vllm/0.19.0
 
-export ENV_ROOT=<path>
+export ENV_ROOT="/path/to/persistent/ray_env_root"
 
 cd "$ENV_ROOT"
 python3 -m venv --system-site-packages baremetal_ray
@@ -68,8 +70,8 @@ Rebuild the Ray virtual environment when changing:
 Update these paths for your account or project:
 
 ```bash
-export BENCH_ROOT=<path>
-export BAREMETAL_RAY_ENV=<path>
+export BENCH_ROOT="/path/to/shared/bench_root"
+export BAREMETAL_RAY_ENV="/path/to/persistent/baremetal_ray"
 ```
 
 `BENCH_ROOT` should be model/run storage on shared storage. `BAREMETAL_RAY_ENV` should point to the reusable Ray virtual environment.

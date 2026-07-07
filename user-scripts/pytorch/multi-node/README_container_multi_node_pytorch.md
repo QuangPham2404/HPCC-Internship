@@ -1,5 +1,7 @@
 # Containerized Multi-Node PyTorch DDP Smoke Test
 
+This is a model script template. Replace the placeholder project, queue, path, storage, and runtime values with valid cluster-specific values before submitting it.
+
 This is a model setup script that you can use as a starting point and change according to your cluster, container, GPU layout, and benchmark needs. The workflow launches a synthetic ResNet-50 Distributed Data Parallel test across multiple PBS GPU nodes using Apptainer and OpenMPI.
 
 ## One-time container download
@@ -34,8 +36,8 @@ Before submitting, update these values in `test_resnet50_multiNode_DDP_env.pbs`:
 | `walltime` | Maximum runtime for the job. |
 | `module load apptainer/...` | Apptainer module available on your cluster. |
 | `module load nvhpc/...` | NVHPC/HPC-X OpenMPI stack used by `mpirun`. |
-| `CONTAINER=<path>` | Absolute path to the PyTorch Apptainer `.sif` image. |
-| `SCRIPT=<path>` | Path to `resnet50_multiNode_DDP_env.py` or another DDP script. |
+| `CONTAINER="/path/to/pytorch_26.04.sif"` | Absolute path to the PyTorch Apptainer `.sif` image. |
+| `SCRIPT="/path/to/resnet50_multiNode_DDP_env.py"` | Path to `resnet50_multiNode_DDP_env.py` or another DDP script. |
 | `NCCL_IB_HCA` | Cluster-specific InfiniBand HCA list, if needed. |
 | `NCCL_DEBUG` / `NCCL_DEBUG_SUBSYS` | Keep enabled for debugging or reduce for cleaner logs. |
 

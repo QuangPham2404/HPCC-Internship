@@ -1,5 +1,7 @@
 # Bare-Metal Single-Node vLLM Smoke Test
 
+This is a model script template. Replace the placeholder project, queue, path, storage, and runtime values with valid cluster-specific values before submitting it.
+
 This workflow launches a vLLM OpenAI-compatible API server directly from the cluster's bare-metal `vllm` module, waits for the server to become ready, and sends one chat-completions request as a sanity test.
 
 Use this script when you want to test the non-containerized vLLM stack on one GPU node. It is the bare-metal counterpart of the containerized single-node script.
@@ -27,7 +29,7 @@ Before submitting the job, check these sections in the script:
    Change this only if the cluster provides another tested bare-metal vLLM module.
 
 3. **Working directory**
-   - `BENCH_ROOT=<path>
+   - `BENCH_ROOT="/path/to/shared/bench_root"`
 
    This should point to a writable persistent storage location with enough capacity for model files, caches, logs, and temporary files.
 
