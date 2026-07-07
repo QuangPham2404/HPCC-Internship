@@ -55,7 +55,7 @@ PBS writes the main job output to the submission directory. The script also writ
 The script creates:
 
 - vLLM server log under `$BENCH_ROOT/logs/`
-- one run directory named like `baremetal_qwen2p5_7b_tp<...>_guidellm_<...>`
+- one run directory named like `baremetal_qwen2p5_7b_tp<...>_<...>`
 - `models.json` from `/v1/models`
 - `request.json` containing the smoke-test prompt
 - `response.json` containing the raw API response

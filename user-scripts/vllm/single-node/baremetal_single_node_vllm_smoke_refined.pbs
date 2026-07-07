@@ -196,7 +196,7 @@ export OMP_NUM_THREADS=1
 # ------------------------------------------------------------
 export VLLM_LOG_DIR="$BENCH_ROOT/logs"
 
-export RUN_TAG="baremetal_qwen2p5_7b_tp${TP_SIZE}_guidellm_${PBS_JOBID:-manual}_$(date +%Y%m%d_%H%M%S)"
+export RUN_TAG="baremetal_qwen2p5_7b_tp${TP_SIZE}_${PBS_JOBID:-manual}_$(date +%Y%m%d_%H%M%S)"
 export RUN_DIR="$PWD/$RUN_TAG"
 
 export VLLM_LOG_FILE="$VLLM_LOG_DIR/vllm_qwen2p5_7b_baremetal_tp${TP_SIZE}_${PBS_JOBID:-manual}.log"
@@ -204,7 +204,6 @@ export MODELS_JSON="$RUN_DIR/models.json"
 export REQUEST_JSON="$RUN_DIR/request.json"
 export RESPONSE_JSON="$RUN_DIR/response.json"
 export RESPONSE_TXT="$RUN_DIR/response_text.txt"
-export GUIDELLM_LOG="$RUN_DIR/guidellm_benchmark.log"
 
 mkdir -p \
   "$HF_HOME" \
@@ -219,7 +218,7 @@ mkdir -p \
   "$BENCH_ROOT/.cache/flashinfer"
 
 echo "============================================================"
-echo "Starting NON-CONTAINERIZED vLLM + GuideLLM benchmark workflow"
+echo "Starting NON-CONTAINERIZED"
 echo "Host:                       $(hostname)"
 echo "BENCH_ROOT:                 $BENCH_ROOT"
 echo "HF_HOME:                    $HF_HOME"
@@ -234,7 +233,6 @@ echo "OMP_NUM_THREADS:            $OMP_NUM_THREADS"
 echo "PBS working dir:            $PWD"
 echo "RUN_DIR:                    $RUN_DIR"
 echo "vLLM log file:              $VLLM_LOG_FILE"
-echo "GuideLLM log file:          $GUIDELLM_LOG"
 echo "CUDA_VISIBLE_DEVICES:       ${CUDA_VISIBLE_DEVICES:-unset}"
 echo "vLLM path:                  $(which vllm)"
 echo "============================================================"
@@ -357,7 +355,7 @@ cat > "$REQUEST_JSON" <<EOF
 EOF
 
 echo "============================================================"
-echo "Sending single-prompt sanity test before GuideLLM"
+echo "Sending single-prompt sanity test"
 echo "Request JSON:  $REQUEST_JSON"
 echo "Response JSON: $RESPONSE_JSON"
 echo "============================================================"
