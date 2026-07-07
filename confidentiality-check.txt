@@ -1,0 +1,31 @@
+Audit this repository for hardcoded user-specific or confidential paths.
+
+Context:
+This repo contains guide scripts for users to plug and play when hosting vLLM. Most paths should be generic or clearly marked as user-configurable placeholders, but some scripts may still contain my personal paths, usernames, home directories, cluster-specific paths, or private project paths.
+
+Task:
+Search the repository for any remaining path or identifier that appears user-specific, private, or not suitable for a public/shared guide.
+
+Look especially for:
+- /home/<username>/...
+- my username or account name
+- absolute paths to my working directories
+- cluster-specific scratch/project paths
+- local machine paths
+- hardcoded model paths that should be placeholders
+- hardcoded output/log paths that should be configurable
+- private hostnames, IPs, or server names
+- any token, credential, key, or secret-looking string
+
+Important:
+Do not modify any files.
+Only report findings.
+
+For each finding, report:
+1. File path
+2. Line number if available
+3. The suspicious text/path
+4. Why it may be unsuitable
+5. Suggested generic replacement wording or placeholder
+
+If something is intentionally okay because it is an example path, say so separately.

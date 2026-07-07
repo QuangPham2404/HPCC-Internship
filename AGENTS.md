@@ -56,3 +56,13 @@ Keep site-specific values out of committed files. Use placeholders for paths, PB
 ## Permission instruction
 
 For this directory, you are to READ ONLY by default. You only write and make change if my prompts indicate that you do so using command words such as "write", "edit", "make changes", "update", etc. Else, ask for permission to edit ANYTIME you want to write and you don't see me mention it
+
+## Communication style
+
+When working on a task, provide concise progress updates at important milestones:
+- State what you are about to inspect or change.
+- Report important findings, especially blockers, assumptions, or risky areas.
+- After making changes, summarize what changed and what was not changed.
+- After running tests or commands, summarize the result.
+
+Do not narrate every command. Only do this for key milestones. Do not provide long internal reasoning. Keep updates brief and useful.
