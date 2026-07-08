@@ -18,7 +18,7 @@ Use the pinned `26.04` container version. Do not install the `latest` tag, becau
 
 ```bash
 module load apptainer/1.4.1
-apptainer pull vllm_26.04.sif docker://nvcr.io/nvidia/vllm:26.04
+apptainer pull vllm_26.04-py3.sif docker://nvcr.io/nvidia/vllm:26.04
 ```
 
 After the pull completes, use the absolute path to `vllm_26.04.sif` as the `SIF` value in the containerized PBS script and in the Ray installation commands below.
