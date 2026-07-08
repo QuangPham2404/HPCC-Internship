@@ -14,7 +14,7 @@ Use the pinned `26.04` container version. Do not install the `latest` tag, becau
 
 ```bash
 module load apptainer/1.4.1
-apptainer pull pytorch_26.04.sif docker://nvcr.io/nvidia/pytorch:26.04
+apptainer pull pytorch_26.04-py3.sif docker://nvcr.io/nvidia/pytorch:26.04-py3
 ```
 
 After the pull completes, use the absolute path to `pytorch_26.04.sif` as the `container_path` value in the containerized PBS script.
