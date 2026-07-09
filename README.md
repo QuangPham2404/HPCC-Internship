@@ -16,7 +16,7 @@ From the benchmarking process, plug-and-play user scripts for training model usi
 
 The scripts were tested on an internal multi-GPU cluster environment. Hardware details are intentionally kept high-level for confidentiality:
 
-- Dual Intel CPU compute nodes
+- Dual Intel CPU sockets
 - 56 CPU cores per node
 - 8× NVIDIA H200 NVL GPUs per node
 - Multiple high-speed network interfaces per node
