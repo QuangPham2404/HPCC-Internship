@@ -342,7 +342,7 @@ echo "$MODELS_JSON"
 # ------------------------------------------------------------
 cat > "$REQUEST_JSON" <<EOF
 {
-  "model": "Qwen/Qwen2.5-3B-Instruct",
+  "model": "Qwen/Qwen2.5-7B-Instruct",
   "messages": [
     {
       "role": "user",

@@ -34,7 +34,7 @@ Before submitting the job, check these sections in the script:
    This should point to a writable persistent storage location with enough capacity for model files, caches, logs, and temporary files.
 
 4. **Model and server settings**
-   - `MODEL_ID="Qwen/Qwen2.5-3B-Instruct"`
+   - `MODEL_ID="Qwen/Qwen2.5-7B-Instruct"`
    - `PORT=8000`
    - `HOST="0.0.0.0"`
 
